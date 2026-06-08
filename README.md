@@ -1,23 +1,89 @@
-Installation
-============
+# UniSaaS.UniCORE.Dovecot
 
-See [INSTALL.md](INSTALL.md) file.
+**SCAFFOLD-ANCHOR repository — initial scaffold 2026-06-04.**
 
+Full scaffolding, upstream-fork integration, and source-code work all pending a fresh dedicated kickoff arc. This initial commit exists to lock the repository's identity, licence position, and place in the UniCORE Sanity Check fleet so the work cannot be forgotten.
 
-Configuration
-=============
+Author: **Bryan Fred, Unitek Systems Limited, Bedford, United Kingdom.**
+First commit: **2026-06-04 17:45 UTC.**
 
-See [https://doc.dovecot.org](https://doc.dovecot.org).
+---
 
+## What this repository is
 
-RFCs Implemented
-================
+`bryanunitek/UniSaaS.UniCORE.Dovecot` is the **Dovecot** family member: SaaS-deployment-shape public gift surface. Documentation today; source code at certification.
 
-See [RFCs](https://doc.dovecot.org/latest/core/rfc.html).
+**Family purpose:** Open-source IMAP/POP3 server — inbound mail access for UniCORE.GVB.
 
-Contact Info
-============
+**Deployment shape:** This is the **SaaS-shape** member of the family. It tracks the same upstream codebase as [`UniCORE.Dovecot`](https://github.com/bryanunitek/UniCORE.Dovecot) (on-prem shape) but carries SaaS-specific configuration, multi-tenant isolation patterns, and cloud-native deployment artefacts.
 
-[https://www.dovecot.org/](https://www.dovecot.org/)
+---
 
-Please use the Dovecot mailing list dovecot@dovecot.org for questions about Dovecot. You can post to the list without subscribing, the mail then waits in a moderator queue for a while. See [https://www.dovecot.org/mailing-lists](https://www.dovecot.org/mailing-lists)
+## Upstream
+
+- **Upstream project:** https://github.com/dovecot/core
+- **Upstream licence:** MIT/LGPL-2.1
+- **Our relationship:** Fork-and-extend. Upstream codebase is consumed verbatim under its original licence; our additions sit on top under CC BY 4.0.
+
+The merge discipline that governs how this repository absorbs upstream changes is documented in [`UPSTREAM-MERGE-DISCIPLINE.md`](UPSTREAM-MERGE-DISCIPLINE.md).
+
+---
+
+## Platforms
+
+Windows · Linux · macOS · iOS · Android
+
+---
+
+## Family — the four-repo pattern
+
+UniCORE.Dovecot is published as a **four-repo family**:
+
+- `bryanunitek/UniCORE.Dovecot` — public on-prem-deployment-shape gift surface
+- `bryanunitek/UniSaaS.UniCORE.Dovecot` — public SaaS-deployment-shape gift surface ← **this repo**
+- `bryanunitek/UniCORE.Dovecot-Claw` (private) — on-prem-shape working repository
+- `bryanunitek/UniSaaS.UniCORE.Dovecot-Claw` (private) — SaaS-shape working repository
+
+---
+
+## Status
+
+**SCAFFOLD-ANCHOR** as of 2026-06-04. See [`STATUS.md`](STATUS.md) for the full status breakdown.
+
+---
+
+## Files in this scaffold commit
+
+- [`README.md`](README.md) — this file
+- [`LICENSE.md`](LICENSE.md) — UniCORE additions licence
+- [`STATUS.md`](STATUS.md) — scaffold-anchor status
+- [`UPSTREAM-MERGE-DISCIPLINE.md`](UPSTREAM-MERGE-DISCIPLINE.md) — canonical merge discipline
+- [`AI-AUTHORSHIP.md`](AI-AUTHORSHIP.md) — AI authorship disclosure
+
+---
+
+## Related repositories — UniCORE programme
+
+**Foundation triad (gift, public, CC BY 4.0):**
+- [`UniVERSE`](https://github.com/bryanunitek/UniVERSE) — programme
+- [`TrueAI`](https://github.com/bryanunitek/TrueAI) — Foundation (Nine Invariants)
+- [`UniCORE-AI`](https://github.com/bryanunitek/UniCORE-AI) — reference architecture (12 Levels)
+
+**Implementation reference (deployment-shape pair):**
+- [`UniCORE`](https://github.com/bryanunitek/UniCORE) — on-prem-shape
+- [`UniSaaS.UniCORE`](https://github.com/bryanunitek/UniSaaS.UniCORE) — SaaS-shape
+
+**Substrate-services layer (deployment-shape pair):**
+- [`UniCORE.GVB`](https://github.com/bryanunitek/UniCORE.GVB) — on-prem-shape
+- [`UniSaaS.UniCORE.GVB`](https://github.com/bryanunitek/UniSaaS.UniCORE.GVB) — SaaS-shape
+
+---
+
+## Contact
+
+- **Public discussion:** [GitHub Discussions](https://github.com/bryanunitek/UniSaaS.UniCORE.Dovecot/discussions)
+- **Private contact / connection request:** [LinkedIn — Bryan Fred](https://www.linkedin.com/in/bryan-fred-02209753/)
+
+---
+
+*Author: Bryan Fred, Unitek Systems Limited, Bedford, United Kingdom. Public. Given, not sold. Irrevocable.*
