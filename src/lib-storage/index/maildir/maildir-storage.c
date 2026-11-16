@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "ioloop.h"
@@ -614,8 +614,7 @@ static void maildir_mailbox_close(struct mailbox *box)
 		timeout_remove(&mbox->keep_lock_to);
 	}
 
-	if (mbox->flags_view != NULL)
-		mail_index_view_close(&mbox->flags_view);
+	mail_index_view_close(&mbox->flags_view);
 	if (mbox->keywords != NULL)
 		maildir_keywords_deinit(&mbox->keywords);
 	if (mbox->uidlist != NULL)
@@ -639,12 +638,20 @@ static void maildir_notify_changes(struct mailbox *box)
 }
 
 static bool
-maildir_is_internal_name(struct mailbox_list *list ATTR_UNUSED,
+maildir_is_internal_name(struct mailbox_list *list,
 			 const char *name)
 {
-	return strcmp(name, "cur") == 0 ||
-		strcmp(name, "new") == 0 ||
-		strcmp(name, "tmp") == 0;
+	struct maildir_mailbox_list_context *mlist =
+		MODULE_CONTEXT(list, maildir_mailbox_list_module);
+
+	if (strcmp(name, "cur") == 0 ||
+	    strcmp(name, "new") == 0 ||
+	    strcmp(name, "tmp") == 0)
+		return TRUE;
+
+	if (mlist->module_ctx.super.is_internal_name != NULL)
+		return mlist->module_ctx.super.is_internal_name(list, name);
+	return FALSE;
 }
 
 static void maildir_storage_add_list(struct mail_storage *storage ATTR_UNUSED,

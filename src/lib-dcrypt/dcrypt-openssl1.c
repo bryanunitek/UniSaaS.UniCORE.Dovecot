@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #ifndef DOVECOT_USE_OPENSSL3
 
@@ -1279,19 +1279,24 @@ dcrypt_openssl_cipher_key_dovecot_v2(const char *cipher,
 				     const char **error_r)
 {
 	struct dcrypt_context_symmetric *dctx;
-	bool res;
+	unsigned char tag[DCRYPT_AEAD_TAG_LEN];
+	bool res, aead;
 
-	if (!dcrypt_openssl_ctx_sym_create(cipher, mode, &dctx, error_r)) {
+	if (!dcrypt_openssl_ctx_sym_create(cipher, mode, &dctx, error_r))
 		return FALSE;
-	}
+	unsigned long flags = EVP_CIPHER_flags(dctx->cipher);
+	aead = (flags & EVP_CIPH_FLAG_AEAD_CIPHER) != 0;
 
 	/* generate encryption key/iv based on secret/salt */
-	buffer_t *key_data = t_buffer_create(128);
+	size_t key_data_len = dcrypt_openssl_ctx_sym_get_key_length(dctx) +
+			      dcrypt_openssl_ctx_sym_get_iv_length(dctx);
+	if (aead && mode == DCRYPT_MODE_ENCRYPT)
+		key_data_len += sizeof(tag); /* TAG SIZE */
+	buffer_t *key_data = t_buffer_create(key_data_len);
+
 	res = dcrypt_openssl_pbkdf2(secret->data, secret->used,
 		salt->data, salt->used, digalgo, rounds, key_data,
-		dcrypt_openssl_ctx_sym_get_key_length(dctx) +
-			dcrypt_openssl_ctx_sym_get_iv_length(dctx),
-		error_r);
+		key_data_len, error_r);
 
 	if (!res) {
 		dcrypt_openssl_ctx_sym_destroy(&dctx);
@@ -1308,15 +1313,38 @@ dcrypt_openssl_cipher_key_dovecot_v2(const char *cipher,
 		kd + dcrypt_openssl_ctx_sym_get_key_length(dctx),
 		dcrypt_openssl_ctx_sym_get_iv_length(dctx));
 
-	if (!dcrypt_openssl_ctx_sym_init(dctx, error_r) ||
+	if (!dcrypt_openssl_ctx_sym_init(dctx, error_r))
+		res = FALSE;
+
+	size_t input_size = input->used;
+
+	if (res && aead && mode == DCRYPT_MODE_DECRYPT) {
+		if (input_size < sizeof(tag)) {
+			*error_r = "Corrupted data";
+			res = FALSE;
+		} else {
+			/* take tag from the end of input */
+			memcpy(tag, CONST_PTR_OFFSET(input->data,
+					input_size - sizeof(tag)), sizeof(tag));
+			input_size -= sizeof(tag);
+		}
+		dcrypt_openssl_ctx_sym_set_tag(dctx, tag, sizeof(tag));
+	} else if (res && aead && mode == DCRYPT_MODE_ENCRYPT) {
+		size_t pos = dcrypt_openssl_ctx_sym_get_key_length(dctx) +
+			dcrypt_openssl_ctx_sym_get_iv_length(dctx);
+		dcrypt_openssl_ctx_sym_set_aad(dctx, kd + pos, DCRYPT_AEAD_TAG_LEN);
+	}
+
+	if (!res ||
 	    !dcrypt_openssl_ctx_sym_update(dctx, input->data,
-					   input->used, tmp, error_r) ||
+					   input_size, tmp, error_r) ||
 	    !dcrypt_openssl_ctx_sym_final(dctx, tmp, error_r)) {
 		res = FALSE;
 	} else {
 		/* provide result if succeeded */
+		if (aead && mode == DCRYPT_MODE_ENCRYPT)
+			dcrypt_openssl_ctx_sym_get_tag(dctx, tmp);
 		buffer_append_buf(result_r, tmp, 0, SIZE_MAX);
-		res = TRUE;
 	}
 	/* and ensure no data leaks */
 	buffer_clear_safe(tmp);
@@ -2618,15 +2646,15 @@ dcrypt_openssl_load_public_key_dovecot_v1(struct dcrypt_public_key **key_r,
 		EVP_PKEY_set1_EC_KEY(key, eckey);
 		EC_KEY_free(eckey);
 		/* make sure digest matches */
-		buffer_t *dgst = t_buffer_create(32);
+		buffer_t *digest = t_buffer_create(32);
 		struct dcrypt_public_key tmp;
 		i_zero(&tmp);
 		tmp.key = key;
-		if (!dcrypt_openssl_public_key_id_old(&tmp, dgst, error_r)) {
+		if (!dcrypt_openssl_public_key_id_old(&tmp, digest, error_r)) {
 			EVP_PKEY_free(key);
 			return FALSE;
 		}
-		if (strcmp(binary_to_hex(dgst->data, dgst->used),
+		if (strcmp(binary_to_hex(digest->data, digest->used),
 			   input[len-1]) != 0) {
 			*error_r = "Key id mismatch after load";
 			EVP_PKEY_free(key);
@@ -2667,15 +2695,15 @@ dcrypt_openssl_load_public_key_dovecot_v2(struct dcrypt_public_key **key_r,
 	}
 
 	/* make sure digest matches */
-	buffer_t *dgst = t_buffer_create(32);
+	buffer_t *digest = t_buffer_create(32);
 	struct dcrypt_public_key tmpkey;
 	i_zero(&tmpkey);
 	tmpkey.key = pkey;
-	if (!dcrypt_openssl_public_key_id(&tmpkey, "sha256", dgst, error_r)) {
+	if (!dcrypt_openssl_public_key_id(&tmpkey, "sha256", digest, error_r)) {
 		EVP_PKEY_free(pkey);
 		return FALSE;
 	}
-	if (strcmp(binary_to_hex(dgst->data, dgst->used), input[len-1]) != 0) {
+	if (strcmp(binary_to_hex(digest->data, digest->used), input[len-1]) != 0) {
 		*error_r = "Key id mismatch after load";
 		EVP_PKEY_free(pkey);
 		return FALSE;
@@ -2759,8 +2787,8 @@ dcrypt_openssl_encrypt_private_key_dovecot(buffer_t *key, int enctype,
 				return FALSE;
 			}
 		} else {
-			/* Loading the key should have failed */
-			i_unreached();
+			*error_r = "Unsupported key type";
+			return FALSE;
 		}
 		/* add encryption key id, reuse peer_key buffer */
 	} else if (enctype == DCRYPT_DOVECOT_KEY_ENCRYPT_PASSWORD) {
@@ -2820,11 +2848,13 @@ dcrypt_openssl_store_private_key_dovecot(struct dcrypt_private_key *key,
 		obj = OBJ_nid2obj(EVP_PKEY_id(pkey));
 	}
 
+	i_assert(obj != NULL);
+
 	int enctype = DCRYPT_KEY_ENCRYPTION_TYPE_NONE;
 	int len = OBJ_obj2txt(objtxt, sizeof(objtxt), obj, 1);
 	if (len < 1)
 		return dcrypt_openssl_error(error_r);
-	if (len > (int)sizeof(objtxt)) {
+	if (len >= (int)sizeof(objtxt)) {
 		*error_r = "Object identifier too long";
 		return FALSE;
 	}
@@ -3571,7 +3601,8 @@ dcrypt_openssl_private_key_type(struct dcrypt_private_key *key)
 		return DCRYPT_KEY_RSA;
 	else if (nid == EVP_PKEY_EC || IS_XD_CURVE(nid))
 		return DCRYPT_KEY_EC;
-	else i_unreached();
+	else
+		return DCRYPT_KEY_UNKNOWN;
 }
 
 static enum dcrypt_key_type
@@ -3584,7 +3615,8 @@ dcrypt_openssl_public_key_type(struct dcrypt_public_key *key)
 		return DCRYPT_KEY_RSA;
 	else if (nid == EVP_PKEY_EC || IS_XD_CURVE(nid))
 		return DCRYPT_KEY_EC;
-	else i_unreached();
+	else
+		return DCRYPT_KEY_UNKNOWN;
 }
 
 /** this is the v1 old legacy way of doing key id's **/
@@ -4286,7 +4318,7 @@ dcrypt_openssl_key_get_curve_public(struct dcrypt_public_key *key,
 
 	if (len < 1) {
 		return dcrypt_openssl_error(error_r);
-	} else if ((unsigned int)len > sizeof(objtxt)) {
+	} else if ((unsigned int)len >= sizeof(objtxt)) {
 		*error_r = "Object name too long";
 		return FALSE;
 	}
@@ -4385,8 +4417,8 @@ static struct dcrypt_vfs dcrypt_openssl_vfs = {
 	.ctx_hmac_init = dcrypt_openssl_ctx_hmac_init,
 	.ctx_hmac_update = dcrypt_openssl_ctx_hmac_update,
 	.ctx_hmac_final = dcrypt_openssl_ctx_hmac_final,
-	.ecdh_derive_secret_local = dcrypt_openssl_ecdh_derive_secret_local,
-	.ecdh_derive_secret_peer = dcrypt_openssl_ecdh_derive_secret_peer,
+	.derive_secret_local = dcrypt_openssl_ecdh_derive_secret_local,
+	.derive_secret_peer = dcrypt_openssl_ecdh_derive_secret_peer,
 	.pbkdf2 = dcrypt_openssl_pbkdf2,
 	.generate_keypair = dcrypt_openssl_generate_keypair,
 	.load_private_key = dcrypt_openssl_load_private_key,
@@ -4425,7 +4457,7 @@ static struct dcrypt_vfs dcrypt_openssl_vfs = {
 	.key_set_usage_private = dcrypt_openssl_key_set_usage_private,
 	.sign = dcrypt_openssl_sign,
 	.verify = dcrypt_openssl_verify,
-	.ecdh_derive_secret = dcrypt_openssl_ecdh_derive_secret,
+	.derive_secret = dcrypt_openssl_ecdh_derive_secret,
 };
 
 void dcrypt_openssl_init(struct module *module ATTR_UNUSED)

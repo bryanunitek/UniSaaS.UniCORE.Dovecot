@@ -1,8 +1,10 @@
-/* Copyright (c) 2009-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
+#include "array.h"
 #include "istream.h"
 #include "istream-chain.h"
+#include "imap-arg.h"
 #include "imap-parser.h"
 #include "test-common.h"
 
@@ -255,6 +257,60 @@ static void test_imap_parser_read_literal(void)
 	test_end();
 }
 
+static void test_imap_parser_quoted_escapes(void)
+{
+	const struct {
+		const char *input;
+		const char *output;
+	} tests[] = {
+		{ "\"foo\"\n", "foo" },		/* no escape */
+		{ "\"a\\\"b\"\n", "a\"b" },	/* "a\"b"  -> a"b */
+		{ "\"a\\\\b\"\n", "a\\b" },	/* "a\\b"  -> a\b */
+		{ "\"\\\"\\\\\"\n", "\"\\" },	/* "\"\\"  -> "\  */
+	};
+
+	test_begin("imap parser quoted-string escapes");
+	for (size_t i = 0; i < N_ELEMENTS(tests); i++) {
+		struct istream *input = test_istream_create(tests[i].input);
+		(void)i_stream_read(input);
+		struct imap_parser *parser =
+			imap_parser_create(input, NULL, 1024, NULL);
+		const struct imap_arg *args;
+		const char *str;
+
+		test_assert_idx(imap_parser_read_args(parser, 0, 0, &args) == 1, i);
+		test_assert_idx(imap_arg_get_astring(&args[0], &str), i);
+		test_assert_strcmp_idx(str, tests[i].output, i);
+
+		imap_parser_unref(&parser);
+		i_stream_destroy(&input);
+	}
+	test_end();
+}
+
+static void test_imap_arg_get_list_empty(void)
+{
+	/* An IMAP_ARG_LIST whose backing array is empty - i.e. holds no
+	   elements at all, not even the temporary IMAP_ARG_EOL - must be
+	   reported as a zero-length list. The earlier code indexed the
+	   element one past the (empty) array, reading out of bounds. */
+	pool_t pool = pool_alloconly_create("test imap arg", 256);
+	struct imap_arg arg;
+	const struct imap_arg *list;
+	unsigned int count = 0xdead;
+
+	test_begin("imap arg get_list empty");
+	i_zero(&arg);
+	arg.type = IMAP_ARG_LIST;
+	p_array_init(&arg._data.list, pool, 1);
+
+	test_assert(imap_arg_get_list_full(&arg, &list, &count));
+	test_assert(count == 0);
+
+	pool_unref(&pool);
+	test_end();
+}
+
 int main(void)
 {
 	static void (*const test_functions[])(void) = {
@@ -263,6 +319,8 @@ int main(void)
 		test_imap_parser_list_limit,
 		test_imap_parser_read_tag_cmd,
 		test_imap_parser_read_literal,
+		test_imap_parser_quoted_escapes,
+		test_imap_arg_get_list_empty,
 		NULL
 	};
 	return test_run(test_functions);

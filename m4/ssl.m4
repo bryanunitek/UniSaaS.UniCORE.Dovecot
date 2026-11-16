@@ -108,6 +108,7 @@ AC_DEFUN([DOVECOT_SSL], [
 
   dnl LibreSSL
   DOVECOT_CHECK_SSL_FUNC([EVP_PKEY_check])
+
   DOVECOT_CHECK_SSL_FUNC([OPENSSL_buf2hexstr])
   DOVECOT_CHECK_SSL_FUNC([SSL_get1_peer_certificate])
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set_client_hello_cb])

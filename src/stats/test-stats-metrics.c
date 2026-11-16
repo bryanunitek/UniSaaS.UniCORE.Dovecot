@@ -1,4 +1,4 @@
-/* Copyright (c) 2019 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "test-stats-common.h"
 #include "array.h"
@@ -160,7 +160,7 @@ static const struct discrete_test discrete_tests[] = {
 		  "metric/test/group_by/sub_name/method/discrete/method=discrete",
 		  NULL },
 		3,
-		{ "apple", "bannana", "orange", },
+		{ "apple", "banana", "orange", },
 		{ "pie", "yoghurt", "cobbler", },
 	},
 	{

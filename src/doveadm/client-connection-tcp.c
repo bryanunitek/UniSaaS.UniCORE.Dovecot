@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "lib-signals.h"
@@ -400,7 +400,7 @@ client_connection_tcp_authenticate(struct client_connection_tcp *conn)
 		return -1;
 	}
 	pass = t_strndup(data + 9, size - 9);
-	if (!str_equals_timing_almost_safe(pass, set->doveadm_password)) {
+	if (!str_equals_hash_timing_safe(pass, set->doveadm_password)) {
 		e_error(conn->conn.event,
 			"doveadm client authenticated with wrong password");
 		return -1;
@@ -470,8 +470,14 @@ client_connection_tcp_input(struct client_connection_tcp *conn)
 		conn->io_setup = TRUE;
 		if (conn->minor_version >= DOVEADM_PROTOCOL_MIN_VERSION_MULTIPLEX) {
                         struct ostream *os = conn->output;
+			/* PACKET is deprecated; use the STREAM format with
+			   clients new enough to understand it. */
+			enum ostream_multiplex_format format =
+				conn->minor_version >= DOVEADM_PROTOCOL_MIN_VERSION_MULTIPLEX_STREAM ?
+				OSTREAM_MULTIPLEX_FORMAT_STREAM :
+				OSTREAM_MULTIPLEX_FORMAT_PACKET;
 			conn->output = o_stream_create_multiplex(os, SIZE_MAX,
-				OSTREAM_MULTIPLEX_FORMAT_PACKET);
+				format);
                         o_stream_set_name(conn->output, o_stream_get_name(os));
                         o_stream_set_no_error_handling(conn->output, TRUE);
                         o_stream_unref(&os);

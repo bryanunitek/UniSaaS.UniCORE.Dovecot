@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "settings-parser.h"
@@ -116,7 +116,7 @@ static const struct imap_settings imap_default_settings = {
 	.imap_fetch_failure = "disconnect-immediately:disconnect-after:no-after",
 	.imap_metadata = FALSE,
 	.imap_literal_minus = FALSE,
-	.imap_compress_on_proxy = FALSE,
+	.imap_compress_on_proxy = TRUE,
 	.mail_utf8_extensions = FALSE,
 	.imap4rev2_enable = FALSE,
 #ifdef DOVECOT_PRO_EDITION

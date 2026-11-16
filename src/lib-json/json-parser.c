@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2023 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "net.h"
@@ -1068,7 +1068,7 @@ json_parser_do_parse_literal(struct json_parser *parser,
 			if ((unichar_t)*p != ch) {
 				json_parser_error(
 					parser, "Expected value '%s', "
-					"but encounted '%s' + %s",
+					"but encountered '%s' + %s",
 					literal, t_strdup_until(literal, p),
 					json_parser_curchar_str(parser));
 				return JSON_PARSE_ERROR;
@@ -1345,7 +1345,7 @@ json_parser_parse_unicode_escape(struct json_parser *parser,
 			break;
 	}
 	if (ret == JSON_PARSE_NO_DATA) {
-		/* We already checked that 4 octets are available for for hex
+		/* We already checked that 4 octets are available for hex
 		   digits. The only thing that could have happened is that we
 		   encountered the beginnings of an UTF-8 character and no more
 		   input is available. Finish it at a deeper parse level that
@@ -2390,6 +2390,10 @@ json_string_istream_close(struct iostream_private *stream,
 
 	if (jstream->parser != NULL)
 		jstream->parser->str_stream = NULL;
+	/* The parser's input istream doesn't survive json_parser_deinit(),
+	   but a closed string istream may. Drop the io_parent pointer before
+	   it becomes dangling. */
+	jstream->istream.io_parent = NULL;
 }
 
 static struct istream *
@@ -2421,8 +2425,13 @@ json_string_stream_create(struct json_parser *parser, bool complete)
 
 	parser->str_stream = jstream;
 
+	/* We read the parser's input, which isn't our istream-parent. It also
+	   owns the ioloop IO, since it's the istream the caller is reading. */
+	jstream->istream.io_parent = parser->input;
+
 	stream = i_stream_create(&jstream->istream, NULL,
-				 i_stream_get_fd(parser->input), 0);
+				 i_stream_get_fd(parser->input),
+				 ISTREAM_HIDDEN_INPUTS_DECLARED, 0);
 
 	name = i_stream_get_name(parser->input);
 	if (name == NULL || *name == '\0') {

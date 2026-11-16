@@ -1,4 +1,4 @@
-/* Copyright (c) 2019 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -37,6 +37,82 @@ static void test_mail_index_rotate(void)
 	mail_index_view_close(&view);
 	test_mail_index_deinit(&index);
 	test_mail_index_deinit(&index2);
+	test_end();
+}
+
+static void test_mail_index_log_refresh_rotation_race(void)
+{
+	struct mail_index *index, *index2;
+	struct mail_index_view *view, *view2;
+	struct mail_index_transaction *trans;
+	struct mail_transaction_log_file *file;
+	const char *reason, *log_path, *log2_path;
+	uint32_t file_seq, seq;
+	uoff_t file_offset;
+	unsigned int i;
+
+	test_begin("mail index log refresh rotation race");
+	index = test_mail_index_init(TRUE);
+	log_path = t_strconcat(test_mail_index_get_dir(),
+			       "/test.dovecot.index.log", NULL);
+	log2_path = t_strconcat(log_path, ".2", NULL);
+
+	view = mail_index_view_open(index);
+	trans = mail_index_transaction_begin(view,
+			MAIL_INDEX_TRANSACTION_FLAG_EXTERNAL);
+	uint32_t uid_validity = 1234;
+	mail_index_update_header(trans,
+		offsetof(struct mail_index_header, uid_validity),
+		&uid_validity, sizeof(uid_validity), TRUE);
+	mail_index_append(trans, 1, &seq);
+	test_assert(mail_index_transaction_commit(&trans) == 0);
+	mail_index_view_close(&view);
+
+	/* Rotate twice, so .log.2 also exists */
+	for (i = 0; i < 2; i++) {
+		test_assert(mail_transaction_log_sync_lock(index->log, "test",
+			&file_seq, &file_offset) == 0);
+		mail_index_write(index, TRUE, "test");
+		mail_transaction_log_sync_unlock(index->log, "test");
+	}
+
+	/* Second "process" opens the index and sees the latest log head */
+	index2 = test_mail_index_open(FALSE);
+	uint32_t base_seq = index2->log->head->hdr.file_seq;
+
+	/* First index rotates again: .log=base+1, .log.2=base */
+	test_assert(mail_transaction_log_sync_lock(index->log, "test",
+		&file_seq, &file_offset) == 0);
+	mail_index_write(index, TRUE, "test");
+	mail_transaction_log_sync_unlock(index->log, "test");
+
+	/* Simulate the middle of the next rotation: the new log file has
+	   been hard-linked to .log.2, but the newer .log hasn't been
+	   created yet, so both .log and .log.2 point to the base+1 file. */
+	test_assert(i_unlink(log2_path) == 0);
+	test_assert(link(log_path, log2_path) == 0);
+
+	/* index2 (head=base) tries to find an already deleted file seq,
+	   e.g. for syncing a view. It opens .log.2 and finds base+1 in it,
+	   which gets added to its file list, while its head still points
+	   to base. */
+	test_assert(mail_transaction_log_find_file(index2->log, base_seq - 2,
+						   FALSE, &file, &reason) == 0);
+
+	/* index2 appends to the log. Refreshing the log sees that the .log
+	   inode differs from its head (base), but reopening .log finds the
+	   same base+1 file that is already opened via the .log.2 path.
+	   This must not fail the append. */
+	view2 = mail_index_view_open(index2);
+	trans = mail_index_transaction_begin(view2,
+			MAIL_INDEX_TRANSACTION_FLAG_EXTERNAL);
+	mail_index_append(trans, 2, &seq);
+	test_assert(mail_index_transaction_commit(&trans) == 0);
+	mail_index_view_close(&view2);
+	test_assert(index2->log->head->hdr.file_seq == base_seq + 1);
+
+	test_mail_index_close(&index2);
+	test_mail_index_deinit(&index);
 	test_end();
 }
 
@@ -212,6 +288,60 @@ static void test_mail_index_corruption_message_count(void)
 	test_end();
 }
 
+static void test_mail_index_corruption_record_size_zero(void)
+{
+	struct mail_index *index;
+	struct mail_index_view *view;
+	struct mail_index_transaction *trans;
+
+	test_begin("mail index corruption: record_size zero");
+	index = test_mail_index_init(TRUE);
+
+	/* make dovecot.index at least MAIL_INDEX_MMAP_MIN_SIZE bytes */
+	view = mail_index_view_open(index);
+	trans = mail_index_transaction_begin(view,
+			MAIL_INDEX_TRANSACTION_FLAG_EXTERNAL);
+
+	uint32_t uid_validity = 1234;
+	mail_index_update_header(trans,
+				 offsetof(struct mail_index_header, uid_validity),
+				 &uid_validity, sizeof(uid_validity), TRUE);
+
+	uint32_t seq;
+	for (uint32_t uid = 1; uid <= 10000; uid++)
+		mail_index_append(trans, uid, &seq);
+	test_assert(mail_index_transaction_commit(&trans) == 0);
+	mail_index_view_close(&view);
+
+	/* write dovecot.index */
+	struct mail_index_sync_ctx *sync_ctx;
+	test_assert(mail_index_sync_begin(index, &sync_ctx, &view, &trans, 0) > 0);
+	mail_index_write(index, FALSE, "test");
+	test_assert(mail_index_sync_commit(&sync_ctx) == 0);
+
+	test_mail_index_close(&index);
+
+	/* write a corrupted record_size */
+	const char *path = t_strconcat(test_mail_index_get_dir(),
+				       "/test.dovecot.index", NULL);
+	int fd = open(path, O_RDWR);
+	if (fd == -1)
+		i_fatal("open(%s) failed: %m", path);
+
+	uint32_t record_size = 0;
+	test_assert(pwrite(fd, &record_size, sizeof(record_size),
+			   offsetof(struct mail_index_header, record_size)) ==
+		    sizeof(record_size));
+	i_close_fd(&fd);
+
+	test_expect_error_string("record_size too small");
+	index = test_mail_index_open(FALSE);
+	test_expect_no_more_errors();
+	test_mail_index_deinit(&index);
+
+	test_end();
+}
+
 static void test_mail_index_map_fsck_fail_restores_map(void)
 {
 	struct mail_index *index;
@@ -270,8 +400,10 @@ int main(void)
 {
 	static void (*const test_functions[])(void) = {
 		test_mail_index_rotate,
+		test_mail_index_log_refresh_rotation_race,
 		test_mail_index_new_extension,
 		test_mail_index_corruption_message_count,
+		test_mail_index_corruption_record_size_zero,
 		test_mail_index_map_fsck_fail_restores_map,
 		NULL
 	};

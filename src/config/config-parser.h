@@ -1,6 +1,7 @@
 #ifndef CONFIG_PARSER_H
 #define CONFIG_PARSER_H
 
+#include "bits.h"
 #include "config-filter.h"
 
 #include <sys/stat.h>
@@ -45,10 +46,23 @@ enum config_parse_flags {
 	CONFIG_PARSE_FLAG_DEFAULT_VERSION = BIT(11),
 };
 
+/* First byte of every prefixed_str value. Flags may be combined. */
+enum config_value_prefix {
+	/* Fully expanded literal value. */
+	CONFIG_VALUE_PREFIX_EXPANDED       = BIT(0),
+	/* Value contains $SET variables (and perhaps other variables). */
+	CONFIG_VALUE_PREFIX_SET_UNEXPANDED = BIT(1),
+	/* Value set via heredoc syntax; stored as flags+<marker>\n<value>. */
+	CONFIG_VALUE_PREFIX_HEREDOC        = BIT(2),
+	/* SET_FILE inline content (not a file path). When combined with
+	   HEREDOC, the heredoc marker is preserved; standalone means the
+	   value arrived via "inline:" assignment. */
+	CONFIG_VALUE_PREFIX_FILE_INLINE    = BIT(3),
+};
+
+/* String literal for CONFIG_VALUE_PREFIX_EXPANDED, used in concatenation
+   contexts where a char constant cannot be used. */
 #define CONFIG_VALUE_PREFIX_EXPANDED_S "\001"
-#define CONFIG_VALUE_PREFIX_EXPANDED CONFIG_VALUE_PREFIX_EXPANDED_S[0]
-/* value contains $SET variables (and perhaps other variables) */
-#define CONFIG_VALUE_PREFIX_SET_UNEXPANDED '\002'
 
 /* Used to track changed settings for a setting_parser_info. Initially only
    the "info" is set, while everything else is NULL. Once the first setting
@@ -123,8 +137,10 @@ config_parsed_get_global_default_filter_parser(const struct config_parsed *confi
 /* Returns all filters */
 struct config_filter_parser *const *
 config_parsed_get_filter_parsers(const struct config_parsed *config);
-/* Fill settings parser with settings from the given module parser. */
-void config_fill_set_parser(struct setting_parser_context *parser,
+/* Fill settings parser with settings from the given module parser. Returns
+   TRUE if parser could be filled successfully, FALSE if some of the values
+   couldn't be expanded due to e.g. %{variables}. */
+bool config_fill_set_parser(struct setting_parser_context *parser,
 			    const struct config_module_parser *p,
 			    bool expand_values);
 HASH_TABLE_TYPE(config_key)

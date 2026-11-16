@@ -1,5 +1,4 @@
-/* Copyright (c) the Dovecot authors, based on code by Michael Slusarz.
- * See the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -502,7 +501,7 @@ fts_backend_flatcurve_rescan_box(struct flatcurve_fts_backend *backend,
 				u2, u);
 		} else {
 			e_debug(e->add_str("status", "expunge_msgs")->event(),
-				"Rescan: expunge non-existent messages "
+				"Rescan: expunge nonexistent messages "
 				"expunged=%s", u);
 		}
 	} T_END;
@@ -718,17 +717,17 @@ fts_backend_flatcurve_lookup(struct fts_backend *_backend, struct mailbox *box,
 /* Returns: 0 if FTS directory doesn't exist, 1 on deletion, -1 on error */
 int fts_backend_flatcurve_delete_dir(const char *path, const char **error_r)
 {
+	i_assert(error_r != NULL);
+
 	struct stat st;
 	enum unlink_directory_flags unlink_flags = UNLINK_DIRECTORY_FLAG_RMDIR;
 
 	if (stat(path, &st) < 0) {
 		if (errno == ENOENT)
 			return 0;
-		else {
-			*error_r = t_strdup_printf("Deleting fts data failed: "
-				"stat(%s) failed: %m", path);
-			return -1;
-		}
+		*error_r = t_strdup_printf("Deleting fts data failed: "
+			"stat(%s) failed: %m", path);
+		return -1;
 	}
 
 	if (S_ISDIR(st.st_mode)) {
@@ -749,7 +748,8 @@ int fts_backend_flatcurve_delete_dir(const char *path, const char **error_r)
 
 struct fts_backend fts_backend_flatcurve = {
 	.name = "flatcurve",
-	.flags = FTS_BACKEND_FLAG_TOKENIZED_INPUT,
+	.flags = FTS_BACKEND_FLAG_TOKENIZED_INPUT |
+		 FTS_BACKEND_FLAG_SEARCH_ARGS_V2,
 	.v = {
 		.alloc = fts_backend_flatcurve_alloc,
 		.init = fts_backend_flatcurve_init,

@@ -1,4 +1,4 @@
-/* Copyright (c) 2003-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "istream.h"
@@ -320,12 +320,15 @@ void index_mail_parse_header(struct message_part *part,
 	if (data->save_bodystructure_header &&
 	    !data->parsed_bodystructure_header) {
 		i_assert(part != NULL);
-		message_part_data_parse_from_header(mail->mail.data_pool, part, hdr);
+		message_part_data_parse_from_header(mail->mail.data_pool, part,
+						    &mail->data.part_data_limits,
+						    hdr);
 	}
 
 	if (data->save_envelope) {
 		message_part_envelope_parse_from_header(mail->mail.data_pool,
-					   &data->envelope_data, hdr);
+					   &data->envelope_data,
+					   &mail->data.part_data_limits, hdr);
 
 		if (hdr == NULL)
                         index_mail_parse_finish_imap_envelope(mail);
@@ -522,7 +525,8 @@ imap_envelope_parse_callback(struct message_header_line *hdr,
 			     struct index_mail *mail)
 {
 	message_part_envelope_parse_from_header(mail->mail.data_pool,
-				   &mail->data.envelope_data, hdr);
+				   &mail->data.envelope_data,
+				   &mail->data.part_data_limits, hdr);
 
 	if (hdr == NULL)
 		index_mail_parse_finish_imap_envelope(mail);
@@ -1004,6 +1008,11 @@ int index_mail_get_header_stream(struct mail *_mail,
 					      HEADER_FILTER_HIDE_BODY,
 					      headers->name, headers->count,
 					      header_cache_callback, mail);
+	/* Cap per-header data so a single pathological header cannot exhaust
+	   memory in mail->header_data / the filter's buffer. */
+	i_stream_header_filter_set_max_header_block_size(
+		mail->data.filter_stream,
+		MESSAGE_HEADER_BLOCK_DEFAULT_MAX_SIZE);
 	*stream_r = mail->data.filter_stream;
 	return 0;
 }

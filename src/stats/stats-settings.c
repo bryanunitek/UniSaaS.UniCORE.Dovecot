@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "stats-common.h"
 #include "buffer.h"
@@ -608,7 +608,7 @@ stats_settings_ext_check(struct event *event, void *_set,
 		}
 		if (ret == 0) {
 			*error_r = t_strdup_printf("metric %s refers to "
-						   "non-existent exporter '%s'",
+						   "nonexistent exporter '%s'",
 						   metric_name,
 						   metric_exporter);
 			return FALSE;

@@ -172,7 +172,6 @@ struct auth_request {
 	union {
 		verify_plain_callback_t *verify_plain;
 		lookup_credentials_callback_t *lookup_credentials;
-		set_credentials_callback_t *set_credentials;
                 userdb_callback_t *userdb;
 	} private_callback;
 	/* Used by passdb's credentials lookup to determine which scheme is
@@ -202,6 +201,11 @@ struct auth_request {
 	bool domain_is_realm:1;
 
 	bool request_auth_token:1;
+	/* A trusted (unrestricted) master connection vouches that session_pid
+	   is correct, even though the connecting peer's pid doesn't match it.
+	   Used by auth proxies (e.g. cluster) that connect to auth on behalf
+	   of the actual session process. */
+	bool session_pid_trusted:1;
 
 	/* success/failure states: */
 	bool failed:1; /* overrides any other success */
@@ -408,15 +412,12 @@ void auth_request_db_log_login_failure(struct auth_request *request,
 void
 auth_request_verify_plain_callback_finish(enum passdb_result result,
                                           struct auth_request *request);
-void auth_request_verify_plain_callback(enum passdb_result result,
+void auth_request_verify_plain_passdb_callback(enum passdb_result result,
 					struct auth_request *request);
 void auth_request_lookup_credentials_callback(enum passdb_result result,
 					      const unsigned char *credentials,
-					      size_t size,
+					      size_t size, const char *scheme,
 					      struct auth_request *request);
-void auth_request_set_credentials(struct auth_request *request,
-				  const char *scheme, const char *data,
-				  set_credentials_callback_t *callback);
 void auth_request_userdb_callback(enum userdb_result result,
 				  struct auth_request *request);
 void auth_request_default_verify_plain_continue(

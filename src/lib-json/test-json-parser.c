@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2023 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "str.h"
@@ -2054,7 +2054,7 @@ invalid_parse_tests[] = {
 	},
 	{
 		// invalid/lone-second-surrogate/input
-		.input = "[\"\\uDFAA (second surrogate on it's own)\"]\n",
+		.input = "[\"\\uDFAA (second surrogate on its own)\"]\n",
 	},
 	{
 		// invalid/negative-integer-starting-with-zero/input

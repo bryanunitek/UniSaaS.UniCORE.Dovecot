@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -91,6 +91,9 @@ struct dsync_mailbox_importer {
 	/* UID => struct dsync_mail_change */
 	HASH_TABLE_TYPE(dsync_uid_mail_change) local_changes;
 	HASH_TABLE_TYPE(dsync_attr_change) local_attr_changes;
+	/* Attribute keys received from the remote, prefixed with the
+	   attribute type character. */
+	HASH_TABLE(char *, char *) remote_attr_keys;
 
 	ARRAY_TYPE(seq_range) maybe_expunge_uids;
 	ARRAY(struct dsync_mail_change *) maybe_saves;
@@ -131,6 +134,7 @@ struct dsync_mailbox_importer {
 	bool delete_mailbox:1;
 	bool empty_hdr_workaround:1;
 	bool no_header_hashes:1;
+	bool delete_unknown_attrs:1;
 };
 
 static const char *dsync_mail_change_type_names[] = {
@@ -270,6 +274,12 @@ dsync_mailbox_import_init(struct mailbox *box,
 		(set->flags & DSYNC_MAILBOX_IMPORT_FLAG_MASTER_BRAIN) != 0;
 	importer->revert_local_changes =
 		(set->flags & DSYNC_MAILBOX_IMPORT_FLAG_REVERT_LOCAL_CHANGES) != 0;
+	importer->delete_unknown_attrs =
+		(set->flags & DSYNC_MAILBOX_IMPORT_FLAG_DELETE_UNKNOWN_ATTRS) != 0;
+	if (importer->delete_unknown_attrs) {
+		hash_table_create(&importer->remote_attr_keys, pool, 0,
+				  str_hash, strcmp);
+	}
 	importer->mails_have_guids =
 		(set->flags & DSYNC_MAILBOX_IMPORT_FLAG_MAILS_HAVE_GUIDS) != 0;
 	importer->mails_use_guid128 =
@@ -418,9 +428,15 @@ dsync_attributes_cmp_values(const struct dsync_mailbox_attribute *attr1,
 		i_stream_create_from_data(attr1->value, strlen(attr1->value));
 	input2 = attr2->value_stream != NULL ? attr2->value_stream :
 		i_stream_create_from_data(attr2->value, strlen(attr2->value));
+	i_assert(input1->seekable);
+	i_assert(input2->seekable);
 	i_stream_seek(input1, 0);
 	i_stream_seek(input2, 0);
 	ret = dsync_istreams_cmp(input1, input2, cmp_r, error_r);
+	/* The caller may still save the value from the stream, so rewind it
+	   back to the beginning. */
+	i_stream_seek(input1, 0);
+	i_stream_seek(input2, 0);
 	if (attr1->value_stream == NULL)
 		i_stream_unref(&input1);
 	if (attr2->value_stream == NULL)
@@ -449,6 +465,23 @@ dsync_attributes_cmp(const struct dsync_mailbox_attribute *attr,
 }
 
 static int
+dsync_mailbox_import_attr_cmp(struct dsync_mailbox_importer *importer,
+			      const struct dsync_mailbox_attribute *attr,
+			      const struct dsync_mailbox_attribute *local_attr,
+			      int *cmp_r)
+{
+	const char *error;
+
+	if (dsync_attributes_cmp(attr, local_attr, cmp_r, &error) < 0) {
+		e_error(importer->event, "%s", error);
+		importer->mail_error = MAIL_ERROR_TEMP;
+		importer->failed = TRUE;
+		return -1;
+	}
+	return 0;
+}
+
+static int
 dsync_mailbox_import_attribute_real(struct dsync_mailbox_importer *importer,
 				    const struct dsync_mailbox_attribute *attr,
 				    const struct dsync_mailbox_attribute *local_attr,
@@ -466,7 +499,20 @@ dsync_mailbox_import_attribute_real(struct dsync_mailbox_importer *importer,
 		*result_r = "Nonexistent in both sides";
 		return 0;
 	}
-	if (local_attr == NULL) {
+	if (importer->revert_local_changes) {
+		/* backup: the local attribute must always become identical to
+		   the remote one, regardless of which one is newer */
+		if (local_attr != NULL) {
+			if (dsync_mailbox_import_attr_cmp(importer, attr,
+							  local_attr, &cmp) < 0)
+				return -1;
+			if (cmp == 0) {
+				*result_r = "Unchanged value";
+				return 0;
+			}
+		}
+		*result_r = "Reverting local change";
+	} else if (local_attr == NULL) {
 		/* we haven't seen this locally -> use whatever remote has */
 		*result_r = "Nonexistent locally";
 	} else if (local_attr->modseq <= importer->last_common_modseq &&
@@ -495,13 +541,9 @@ dsync_mailbox_import_attribute_real(struct dsync_mailbox_importer *importer,
 		   so check that first. next try to use modseqs, but if even
 		   they are the same, fallback to just picking one based on the
 		   value. */
-		const char *error;
-		if (dsync_attributes_cmp(attr, local_attr, &cmp, &error) < 0) {
-			e_error(importer->event, "%s", error);
-			importer->mail_error = MAIL_ERROR_TEMP;
-			importer->failed = TRUE;
+		if (dsync_mailbox_import_attr_cmp(importer, attr,
+						  local_attr, &cmp) < 0)
 			return -1;
-		}
 		if (cmp == 0) {
 			/* identical scripts */
 			*result_r = "Unchanged value";
@@ -540,12 +582,121 @@ dsync_mailbox_import_attribute_real(struct dsync_mailbox_importer *importer,
 	return 0;
 }
 
+static char *
+dsync_mailbox_import_attr_hash_key(pool_t pool, enum mail_attribute_type type,
+				   const char *key)
+{
+	char type_chr = type == MAIL_ATTRIBUTE_TYPE_PRIVATE ? 'p' : 's';
+
+	return p_strdup_printf(pool, "%c%s", type_chr, key);
+}
+
+static void
+dsync_mailbox_import_attr_remember(struct dsync_mailbox_importer *importer,
+				   const struct dsync_mailbox_attribute *attr)
+{
+	char *hash_key;
+
+	hash_key = dsync_mailbox_import_attr_hash_key(importer->pool,
+						      attr->type, attr->key);
+	if (hash_table_lookup(importer->remote_attr_keys, hash_key) == NULL)
+		hash_table_insert(importer->remote_attr_keys, hash_key, hash_key);
+}
+
+static int
+dsync_mailbox_import_delete_attrs(struct dsync_mailbox_importer *importer,
+				  enum mail_attribute_type type)
+{
+	struct mailbox_attribute_iter *iter;
+	struct mail_attribute_value value;
+	ARRAY_TYPE(const_string) keys;
+	const char *key, *const *keyp;
+	bool skip;
+	int ret = 0;
+
+	t_array_init(&keys, 8);
+	iter = mailbox_attribute_iter_init(importer->box, type, "");
+	while ((key = mailbox_attribute_iter_next(iter)) != NULL) {
+		if (hash_table_lookup(importer->remote_attr_keys,
+			dsync_mailbox_import_attr_hash_key(pool_datastack_create(),
+							   type, key)) != NULL)
+			continue;
+
+		if (mailbox_attribute_get_stream(importer->box, type,
+						 key, &value) < 0) {
+			e_error(importer->event,
+				"Failed to get attribute %s: %s", key,
+				mailbox_get_last_internal_error(
+					importer->box, &importer->mail_error));
+			ret = -1;
+			break;
+		}
+		/* readonly attributes can't be deleted, and attributes
+		   without a value have nothing to delete */
+		skip = (value.flags & MAIL_ATTRIBUTE_VALUE_FLAG_READONLY) != 0 ||
+			(value.value == NULL && value.value_stream == NULL);
+		if (value.value_stream != NULL)
+			i_stream_unref(&value.value_stream);
+		if (skip)
+			continue;
+
+		key = t_strdup(key);
+		array_push_back(&keys, &key);
+	}
+	if (mailbox_attribute_iter_deinit(&iter) < 0) {
+		e_error(importer->event, "Mailbox attribute iteration failed: %s",
+			mailbox_get_last_internal_error(importer->box,
+							&importer->mail_error));
+		ret = -1;
+	}
+	if (ret < 0)
+		return -1;
+
+	array_foreach(&keys, keyp) {
+		if (mailbox_attribute_unset(importer->trans, type, *keyp) < 0) {
+			e_error(importer->event,
+				"Failed to unset attribute %s: %s", *keyp,
+				mailbox_get_last_internal_error(importer->box,
+								NULL));
+			/* the attributes aren't vital, don't fail everything
+			   just because of them. */
+		} else {
+			e_debug(importer->event,
+				"Delete attribute %s: Nonexistent remotely",
+				*keyp);
+		}
+	}
+	return 0;
+}
+
+int dsync_mailbox_import_attributes_finish(struct dsync_mailbox_importer *importer)
+{
+	int ret = 0;
+
+	if (!importer->delete_unknown_attrs)
+		return 0;
+
+	T_BEGIN {
+		if (dsync_mailbox_import_delete_attrs(importer,
+				MAIL_ATTRIBUTE_TYPE_PRIVATE) < 0 ||
+		    dsync_mailbox_import_delete_attrs(importer,
+				MAIL_ATTRIBUTE_TYPE_SHARED) < 0)
+			ret = -1;
+	} T_END;
+	if (ret < 0)
+		importer->failed = TRUE;
+	return ret;
+}
+
 int dsync_mailbox_import_attribute(struct dsync_mailbox_importer *importer,
 				   const struct dsync_mailbox_attribute *attr)
 {
 	struct dsync_mailbox_attribute *local_attr;
 	const char *result = "";
 	int ret;
+
+	if (importer->delete_unknown_attrs)
+		dsync_mailbox_import_attr_remember(importer, attr);
 
 	if (dsync_mailbox_import_lookup_attr(importer, attr->type,
 					     attr->key, &local_attr) < 0)
@@ -1970,10 +2121,10 @@ dsync_mailbox_import_saved_newmail(struct dsync_mailbox_importer *importer,
 	   are larger than we're committing.
 
 	   Note that if any existing UIDs have been changed, the new UID is
-	   usually higher than anything that is being saved so we can't do
+	   usually greater than anything that is being saved so we can't do
 	   an intermediate commit. It's too much extra work to try to handle
 	   that situation. So here this never happens, because then
-	   array_count(wanted_uids) is always higher than first_unsaved_idx. */
+	   array_count(wanted_uids) is always greater than first_unsaved_idx. */
 	if (importer->saves_since_commit >= importer->commit_msgs_interval &&
 	    importer->first_unsaved_idx == array_count(&importer->wanted_uids)) {
 		if (dsync_mailbox_import_commit(importer, FALSE) < 0)
@@ -2950,6 +3101,7 @@ int dsync_mailbox_import_deinit(struct dsync_mailbox_importer **_importer,
 
 	hash_table_destroy(&importer->import_guids);
 	hash_table_destroy(&importer->import_uids);
+	hash_table_destroy(&importer->remote_attr_keys);
 	array_free(&importer->maybe_expunge_uids);
 	array_free(&importer->maybe_saves);
 	array_free(&importer->wanted_uids);

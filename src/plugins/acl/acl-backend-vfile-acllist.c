@@ -1,4 +1,4 @@
-/* Copyright (c) 2007-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -115,7 +115,7 @@ static int acl_backend_vfile_acllist_read(struct acl_backend_vfile *backend)
 			return 0;
 	}
 
-	fd = open(path, O_RDONLY);
+	fd = open(path, O_RDONLY | O_NOFOLLOW);
 	if (fd == -1) {
 		if (errno == ENOENT) {
 			backend->acllist_mtime = 0;

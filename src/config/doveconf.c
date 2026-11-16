@@ -1,7 +1,8 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
+#include "hash.h"
 #include "path-util.h"
 #include "module-dir.h"
 #include "env-util.h"
@@ -40,6 +41,12 @@ struct config_dump_human_context {
 	ARRAY_TYPE(const_string) strings;
 	struct config_export_context *export_ctx;
 
+	/* Flat global settings (e.g. cassandra_hosts) that are overridden
+	   inside a named filter (e.g. cassandra { hosts }). These are hidden
+	   from the global output, so the same setting isn't shown both flat
+	   and grouped. Only created for the global scope output. */
+	HASH_TABLE(const char *, const char *) hidden_keys;
+
 	bool list_prefix_sent:1;
 };
 
@@ -63,22 +70,81 @@ static const char *const secrets[] = {
 };
 
 
+static const char *
+heredoc_choose_marker(const char *content)
+{
+	unsigned int n = 0;
+	for (;;) {
+		const char *marker = n == 0 ? "END" :
+			t_strdup_printf("END_%u", n);
+		size_t mlen = strlen(marker);
+		bool conflict = FALSE;
+		const char *p = content;
+		while (p != NULL) {
+			if (strncmp(p, marker, mlen) == 0 &&
+			    (p[mlen] == '\n' || p[mlen] == '\0')) {
+				conflict = TRUE;
+				break;
+			}
+			p = strchr(p, '\n');
+			if (p != NULL) p++;
+		}
+		if (!conflict)
+			return marker;
+		n++;
+	}
+}
+
 static void
 config_request_get_strings(const struct config_export_setting *set,
 			   struct config_dump_human_context *ctx)
 {
 	const char *p, *key, *value;
 
+	if (hash_table_is_created(ctx->hidden_keys) &&
+	    hash_table_lookup(ctx->hidden_keys,
+			      t_strcut(set->key, SETTINGS_SEPARATOR)) != NULL) {
+		/* overridden inside a named filter - hide the flat global */
+		return;
+	}
+
 	switch (set->type) {
 	case CONFIG_KEY_NORMAL:
 		key = set->key;
-		if (set->def_type != SET_FILE)
-			value = set->value;
-		else if (set->value[0] != '\n')
-			value = t_strcut(set->value, '\n');
-		else
-			value = t_strconcat(SET_FILE_INLINE_PREFIX,
-					    set->value + 1, NULL);
+		if (set->value_is_file_inline) {
+			/* SET_FILE inline content. set->value starts with \n
+			   (settings_file_get compat); strip it for the body. */
+			const char *content =
+				set->value[0] == '\n' ?
+				set->value + 1 : set->value;
+			if (set->heredoc_marker == NULL &&
+			    strchr(content, '\n') == NULL) {
+				/* No newlines in content: use inline: format.
+				   Heredoc would add a trailing newline and break
+				   round-trip. */
+				value = p_strdup_printf(ctx->pool, "%s%s",
+							SET_FILE_INLINE_PREFIX,
+							content);
+			} else {
+				const char *marker =
+					set->heredoc_marker != NULL ?
+					set->heredoc_marker :
+					heredoc_choose_marker(content);
+				value = p_strdup_printf(ctx->pool, "%c%s\n%s",
+							CONFIG_VALUE_PREFIX_HEREDOC,
+							marker, content);
+			}
+		} else {
+			if (set->def_type == SET_FILE)
+				value = t_strcut(set->value, '\n');
+			else
+				value = set->value;
+			if (set->heredoc_marker != NULL)
+				value = p_strdup_printf(ctx->pool, "%c%s\n%s",
+							CONFIG_VALUE_PREFIX_HEREDOC,
+							set->heredoc_marker,
+							value);
+		}
 		value = p_strdup_printf(ctx->pool, "%s=%s", key, value);
 		break;
 	case CONFIG_KEY_BOOLLIST_ELEM:
@@ -204,6 +270,8 @@ config_dump_human_init(enum config_dump_scope scope,
 
 static void config_dump_human_deinit(struct config_dump_human_context *ctx)
 {
+	if (hash_table_is_created(ctx->hidden_keys))
+		hash_table_destroy(&ctx->hidden_keys);
 	array_free(&ctx->strings);
 	pool_unref(&ctx->pool);
 }
@@ -294,16 +362,18 @@ static inline bool key_ends_with(const char *key, const char *eptr,
 
 static bool
 hide_secrets_from_value(struct ostream *output, const char *key,
-			const char *value)
+			const char *eptr, const char *value)
 {
 	bool ret = FALSE, quote = value_need_quote(value);
 	const char *ptr, *optr, *secret;
 
 	if (*value != '\0' &&
-	    (key_ends_with(key, value, "_password") ||
-	     key_ends_with(key, value, "_key") ||
-	     key_ends_with(key, value, "_nonce") ||
-	     key_ends_with(key, value, "_secret") ||
+	    (key_ends_with(key, eptr, "_password") ||
+	     key_ends_with(key, eptr, "_key_file") ||
+	     key_ends_with(key, eptr, "/key_file") ||
+	     key_ends_with(key, eptr, "_key") ||
+	     key_ends_with(key, eptr, "_nonce") ||
+	     key_ends_with(key, eptr, "_secret") ||
 	     str_begins_with(key, "ssl_dh"))) {
 		o_stream_nsend_str(output, "# hidden, use -P to show it");
 		return TRUE;
@@ -409,7 +479,8 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			 const char *alt_setting_name_filter,
 			 const char *alt_setting_name_filter2,
 			 bool hide_key, bool default_hide_passwords,
-			 const char *strip_prefix, const char *strip_prefix2)
+			 const char *strip_prefix, const char *strip_prefix2,
+			 bool *value_printed)
 {
 	ARRAY_TYPE(const_string) prefixes_arr;
 	ARRAY_TYPE(prefix_stack) prefix_stack;
@@ -586,7 +657,6 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 		}
 
 		bool hide_value = FALSE;
-		const char *full_key = key;
 		try_strip_prefix(&key, strip_prefix, strip_prefix2);
 		value = bool_list_elem ? strrchr(key, '=') : strchr(key, '=');
 		i_assert(value != NULL);
@@ -607,6 +677,7 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 					o_stream_nsend(output, "\"", 1);
 				}
 				boollist_add_space = TRUE;
+				*value_printed = TRUE;
 			}
 			/* value was already written, skip the generic value
 			   writing code. */
@@ -622,24 +693,44 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			}
 			o_stream_nsend_str(output, " = ");
 		} else if (!bool_list_elem || !str_list_elem) {
-			if (output->offset != 0)
+			if (*value_printed)
 				i_fatal("Multiple settings matched with -h parameter");
 		}
+		/* Extract embedded heredoc marker if present */
+		const char *display_value = value + 1;
+		const char *embedded_marker = NULL;
+		if ((unsigned char)display_value[0] == CONFIG_VALUE_PREFIX_HEREDOC) {
+			const char *sep = strchr(display_value + 1, '\n');
+			embedded_marker = t_strdup_until(display_value + 1, sep);
+			display_value = sep + 1;
+		}
+
 		if (hide_key && value[0] == '=' && value[1] == '\0') {
 			/* There is no value that would need printing here,
 			   continue with the next. */
 		} else if (hide_value)
 			; /* boollist value was already written */
 		else if (hide_passwords &&
-			 hide_secrets_from_value(output, full_key, value+1))
+			 hide_secrets_from_value(output, strings[i],
+						 strchr(strings[i], '=') + 1,
+						 display_value))
 			/* sent */
 			;
-		else if (!value_need_quote(value+1))
-			o_stream_nsend_str(output, value+1);
+		else if (embedded_marker != NULL) {
+			size_t dlen = strlen(display_value);
+			o_stream_nsend_str(output, "<<");
+			o_stream_nsend_str(output, embedded_marker);
+			o_stream_nsend_str(output, "\n");
+			o_stream_nsend_str(output, display_value);
+			if (dlen == 0 || display_value[dlen - 1] != '\n')
+				o_stream_nsend_str(output, "\n");
+			o_stream_nsend_str(output, embedded_marker);
+		} else if (!value_need_quote(display_value))
+			o_stream_nsend_str(output, display_value);
 		else {
-			o_stream_nsend(output, "\"", 1);
-			o_stream_nsend_str(output, str_escape(value+1));
-			o_stream_nsend(output, "\"", 1);
+			o_stream_nsend_str(output, "\"");
+			o_stream_nsend_str(output, str_escape(display_value));
+			o_stream_nsend_str(output, "\"");
 		}
 		if (!boollist_one_line && value[1] == '\0' && i+1 < count &&
 		    str_begins(strings[i+1], t_strcut(strings[i], '='), &suffix) &&
@@ -658,6 +749,7 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			boollist_one_line = FALSE;
 			bool_list_elem = str_list_elem = FALSE;
 			o_stream_nsend(output, "\n", 1);
+			*value_printed = TRUE;
 		}
 	end: ;
 	} T_END;
@@ -775,7 +867,8 @@ config_dump_human_filter_path(enum config_dump_scope scope,
 			      struct config_filter_parser *filter_parser,
 			      struct ostream *output, unsigned int indent,
 			      string_t *list_prefix, bool *list_prefix_sent,
-			      bool hide_key, bool hide_passwords)
+			      bool hide_key, bool hide_passwords,
+			      bool *value_printed)
 {
 	for (; filter_parser != NULL; filter_parser = filter_parser->next) {
 		const char *suffix, *set_name_filter = NULL;
@@ -828,9 +921,12 @@ config_dump_human_filter_path(enum config_dump_scope scope,
 		unsigned int sub_indent;
 		size_t parent_list_prefix_len = str_len(list_prefix);
 		/* If we're asking for a specific setting, don't hide
-		   passwords. */
-		bool sub_hide_passwords = set_name_filter != NULL ?
-			FALSE : hide_passwords;
+		   passwords. An empty set_name_filter (e.g. trailing '/' in
+		   the query like "ssl_server/") means show all settings, not
+		   a specific one, so keep passwords hidden. */
+		bool sub_hide_passwords =
+			(set_name_filter == NULL || set_name_filter[0] == '\0') ?
+			hide_passwords : FALSE;
 
 		ctx = config_dump_human_init(scope, filter_parser);
 		sub_indent = hide_key ? 0 :
@@ -861,7 +957,8 @@ config_dump_human_filter_path(enum config_dump_scope scope,
 					 alt_set_name_filter,
 					 alt_set_name_filter2,
 					 hide_key, sub_hide_passwords,
-					 strip_prefix, strip_prefix2);
+					 strip_prefix, strip_prefix2,
+					 value_printed);
 
 		bool sub_list_prefix_sent = ctx->list_prefix_sent;
 		if (scope != CONFIG_DUMP_SCOPE_SET_AND_DEFAULT_AND_GROUP_OVERRIDES) {
@@ -879,14 +976,70 @@ config_dump_human_filter_path(enum config_dump_scope scope,
 		config_dump_human_filter_path(scope, sub_filter_path,
 			filter_parser->children_head, output, sub_indent,
 			list_prefix, &sub_list_prefix_sent,
-			hide_key, hide_passwords);
+			hide_key, hide_passwords, value_printed);
 		if (sub_list_prefix_sent) {
 			*list_prefix_sent = TRUE;
 			config_dump_filter_end(output, sub_indent, indent);
 		}
-		if (hide_key && output->offset == 0)
+		if (hide_key && !*value_printed) {
 			o_stream_nsend(output, "\n", 1);
+			*value_printed = TRUE;
+		}
 		str_truncate(list_prefix, parent_list_prefix_len);
+	}
+}
+
+static void
+config_dump_human_init_hidden_keys(struct config_dump_human_context *ctx,
+				   struct config_filter_parser *global_filter)
+{
+	struct config_filter_parser *child;
+
+	hash_table_create(&ctx->hidden_keys, ctx->pool, 0, str_hash, strcmp);
+
+	for (child = global_filter->children_head; child != NULL;
+	     child = child->next) {
+		/* Only top-level named filters (e.g. "cassandra { }") share
+		   their settings with flat global settings (cassandra_hosts).
+		   Filter arrays (e.g. namespace inbox { }) don't. This also
+		   covers default_settings filters created by doveconf -d's
+		   default filter merging: their settings are still rendered in
+		   the (merged) named filter block, so the flat global is a
+		   duplicate there too. */
+		if (child->dropped || child->filter.filter_name == NULL ||
+		    child->filter.filter_name_array)
+			continue;
+
+		/* The named filter writes its prefixed settings with the
+		   prefix stripped (cassandra { hosts }), so only such settings
+		   duplicate a flat global (cassandra_hosts). Settings without
+		   the prefix (e.g. http_client_* configured inside the filter)
+		   belong to a different scope and must not be hidden. */
+		const char *prefix = t_strconcat(
+			t_strcut(child->filter.filter_name, '/'), "_", NULL);
+
+		const struct config_module_parser *p = child->module_parsers;
+		for (; p->info != NULL; p++) {
+			if (p->change_counters == NULL)
+				continue;
+			for (unsigned int i = 0;
+			     p->info->defines[i].key != NULL; i++) {
+				const char *key = p->info->defines[i].key;
+
+				if (!str_begins_with(key, prefix))
+					continue;
+				/* Hide the flat global only if the named filter
+				   would show it, which matches
+				   CONFIG_DUMP_SCOPE_SET_AND_DEFAULT_OVERRIDES. */
+				if (p->change_counters[i] <
+				    CONFIG_PARSER_CHANGE_DEFAULTS)
+					continue;
+				if (hash_table_lookup(ctx->hidden_keys, key) == NULL) {
+					hash_table_insert(ctx->hidden_keys,
+							  key, key);
+				}
+			}
+		}
 	}
 }
 
@@ -899,6 +1052,10 @@ config_dump_human(enum config_dump_scope scope,
 	struct config_dump_human_context *ctx;
 	struct ostream *output;
 	const char *str;
+	/* Track whether any setting value has been written. The output
+	   stream's offset can't be used for this, because it is initialized
+	   from the current file offset when stdout is a seekable fd. */
+	bool value_printed = FALSE;
 	int ret = 0;
 
 	output = o_stream_create_fd(STDOUT_FILENO, 0);
@@ -910,8 +1067,15 @@ config_dump_human(enum config_dump_scope scope,
 	/* Check for the setting always even with a filter - it might be
 	   e.g. strlist/key */
 	ctx = config_dump_human_init(scope, filter_parser);
+	if (setting_name_filter == NULL) {
+		/* Full dump: hide flat global settings that are overridden
+		   inside a named filter. When a specific setting is requested,
+		   it must still be shown even if it's grouped. */
+		config_dump_human_init_hidden_keys(ctx, filter_parser);
+	}
 	config_dump_human_output(ctx, output, 0, NULL, setting_name_filter, NULL, NULL,
-				 hide_key, hide_passwords, NULL, NULL);
+				 hide_key, hide_passwords, NULL, NULL,
+				 &value_printed);
 	config_dump_human_deinit(ctx);
 
 	string_t *list_prefix = t_str_new(128);
@@ -930,11 +1094,11 @@ config_dump_human(enum config_dump_scope scope,
 	config_dump_human_filter_path(scope, set_filter_path,
 				      filter_parser->children_head, output, 0,
 				      list_prefix, &list_prefix_sent,
-				      hide_key, hide_passwords);
+				      hide_key, hide_passwords, &value_printed);
 
 	if (setting_name_filter == NULL)
 		config_dump_human_include_group(filter_parser, output, NULL, 0);
-	if (hide_key && output->offset == 0)
+	if (hide_key && !value_printed)
 		o_stream_nsend(output, "\n", 1);
 	/* flush output before writing errors */
 	o_stream_uncork(output);
@@ -1129,9 +1293,17 @@ int main(int argc, char *argv[])
 	settings_set_config_binary(SETTINGS_BINARY_DOVECONF);
 	config_parse_load_modules(dump_config_import);
 	if (dump_config_import) {
-		module_dir_unload(&modules);
+		/* Run modules' deinit() while lib is still alive, but
+		   delay the actual dlclose() until after
+		   master_service_deinit() (i.e. lib_deinit()) has run.
+		   Otherwise event categories registered from within a
+		   module (e.g. libdovecot-sieve.so via the managesieve
+		   settings plugin) get unmapped before lib_event_deinit()
+		   tries to access them. */
+		module_dir_deinit(modules);
 		config_parser_deinit();
 		master_service_deinit(&master_service);
+		module_dir_unload(&modules);
 		return 0;
 	}
 
@@ -1243,8 +1415,13 @@ int main(int argc, char *argv[])
 		i_fatal("Errors in configuration");
 
 	config_parsed_free(&config);
-	module_dir_unload(&modules);
+	/* See comment on the module_dir_deinit() call above: run modules'
+	   deinit() now, but delay dlclose() until after
+	   master_service_deinit() has torn down lib (incl. event
+	   categories) so that teardown doesn't touch unmapped memory. */
+	module_dir_deinit(modules);
 	config_parser_deinit();
 	master_service_deinit(&master_service);
+	module_dir_unload(&modules);
         return 0;
 }

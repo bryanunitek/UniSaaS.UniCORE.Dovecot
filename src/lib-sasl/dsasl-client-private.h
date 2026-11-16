@@ -50,7 +50,6 @@ extern const struct dsasl_client_mech dsasl_client_mech_digest_md5;
 extern const struct dsasl_client_mech dsasl_client_mech_external;
 extern const struct dsasl_client_mech dsasl_client_mech_login;
 extern const struct dsasl_client_mech dsasl_client_mech_oauthbearer;
-extern const struct dsasl_client_mech dsasl_client_mech_otp;
 extern const struct dsasl_client_mech dsasl_client_mech_xoauth2;
 extern const struct dsasl_client_mech dsasl_client_mech_scram_sha_1;
 extern const struct dsasl_client_mech dsasl_client_mech_scram_sha_1_plus;
@@ -61,9 +60,9 @@ void dsasl_client_mech_register(const struct dsasl_client_mech *mech);
 void dsasl_client_mech_unregister(const struct dsasl_client_mech *mech);
 
 static inline int
-dasl_client_get_channel_binding(struct dsasl_client *client,
-				const char *type, const buffer_t **data_r,
-				const char **error_r)
+dsasl_client_get_channel_binding(struct dsasl_client *client,
+				 const char *type, const buffer_t **data_r,
+				 const char **error_r)
 {
 	if (client->channel_version == SSL_IOSTREAM_PROTOCOL_VERSION_UNKNOWN ||
 	    client->cbinding_callback == NULL) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "ioloop.h"
@@ -889,8 +889,7 @@ static void imapc_mailbox_close(struct mailbox *box)
 		imapc_client_mailbox_close(&mbox->client_box);
 	if (array_is_created(&mbox->rseq_modseqs))
 		array_free(&mbox->rseq_modseqs);
-	if (mbox->sync_view != NULL)
-		mail_index_view_close(&mbox->sync_view);
+	mail_index_view_close(&mbox->sync_view);
 	timeout_remove(&mbox->to_idle_delay);
 	timeout_remove(&mbox->to_idle_check);
 	imapc_mail_cache_free(&mbox->prev_mail_cache);

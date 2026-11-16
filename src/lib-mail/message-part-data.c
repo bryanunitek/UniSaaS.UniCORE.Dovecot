@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "str.h"
@@ -237,6 +237,7 @@ envelope_get_field(const char *name)
 
 void message_part_envelope_parse_from_header(pool_t pool,
 	struct message_part_envelope **data,
+	struct message_part_data_limits *limits,
 	struct message_header_line *hdr)
 {
 	struct message_part_envelope *d;
@@ -301,9 +302,12 @@ void message_part_envelope_parse_from_header(pool_t pool,
 	if (addr_p != NULL) {
 		message_address_parse_full(pool, hdr->full_value,
 					   hdr->full_value_len,
-					   UINT_MAX,
+					   limits->remaining_addresses,
 					   MESSAGE_ADDRESS_PARSE_FLAG_FILL_MISSING,
 					   &new_addr);
+		i_assert(new_addr.count <= limits->remaining_addresses);
+		limits->remaining_addresses -= new_addr.count;
+
 		/* Merge multiple headers the same as if they were comma
 		   separated in a single line. This is better from security
 		   point of view, because attacker could intentionally write
@@ -311,6 +315,7 @@ void message_part_envelope_parse_from_header(pool_t pool,
 		   validated while MUA only shows the second From header. */
 		DLLIST2_JOIN(&addr_p->head, &addr_p->tail,
 			     &new_addr.head, &new_addr.tail);
+		addr_p->count += new_addr.count;
 	} else if (str_p != NULL) {
 		*str_p = message_header_strdup(pool, hdr->full_value,
 					       hdr->full_value_len);
@@ -322,7 +327,8 @@ void message_part_envelope_parse_from_header(pool_t pool,
 static void
 parse_mime_parameters(struct rfc822_parser_context *parser,
 	pool_t pool, const struct message_part_param **params_r,
-	unsigned int *params_count_r)
+	unsigned int *params_count_r,
+	struct message_part_data_limits *limits)
 {
 	const char *const *results;
 	struct message_part_param *params;
@@ -333,6 +339,10 @@ parse_mime_parameters(struct rfc822_parser_context *parser,
 	params_count = str_array_length(results);
 	i_assert((params_count % 2) == 0);
 	params_count /= 2;
+
+	if (params_count > limits->remaining_mime_params)
+		params_count = limits->remaining_mime_params;
+	limits->remaining_mime_params -= params_count;
 
 	if (params_count > 0) {
 		params = p_new(pool, struct message_part_param, params_count);
@@ -348,7 +358,8 @@ parse_mime_parameters(struct rfc822_parser_context *parser,
 
 static void
 parse_content_type(struct message_part_data *data,
-	pool_t pool, struct message_header_line *hdr)
+	pool_t pool, struct message_header_line *hdr,
+	struct message_part_data_limits *limits)
 {
 	struct rfc822_parser_context parser;
 	string_t *str;
@@ -391,7 +402,7 @@ parse_content_type(struct message_part_data *data,
 
 	parse_mime_parameters(&parser, pool,
 		&data->content_type_params,
-		&data->content_type_params_count);
+		&data->content_type_params_count, limits);
 	rfc822_parser_deinit(&parser);
 }
 
@@ -416,7 +427,8 @@ parse_content_transfer_encoding(struct message_part_data *data,
 
 static void
 parse_content_disposition(struct message_part_data *data,
-	pool_t pool, struct message_header_line *hdr)
+	pool_t pool, struct message_header_line *hdr,
+	struct message_part_data_limits *limits)
 {
 	struct rfc822_parser_context parser;
 	string_t *str;
@@ -433,13 +445,14 @@ parse_content_disposition(struct message_part_data *data,
 
 	parse_mime_parameters(&parser, pool,
 		&data->content_disposition_params,
-		&data->content_disposition_params_count);
+		&data->content_disposition_params_count, limits);
 	rfc822_parser_deinit(&parser);
 }
 
 static void
 parse_content_language(struct message_part_data *data,
-	pool_t pool, const unsigned char *value, size_t value_len)
+	pool_t pool, const unsigned char *value, size_t value_len,
+	struct message_part_data_limits *limits)
 {
 	struct rfc822_parser_context parser;
 	ARRAY_TYPE(const_string) langs;
@@ -457,8 +470,11 @@ parse_content_language(struct message_part_data *data,
 
 	rfc822_skip_lwsp(&parser);
 	while (rfc822_parse_atom(&parser, str) >= 0) {
-		const char *lang = p_strdup(pool, str_c(str));
+		if (limits->remaining_language_tags == 0)
+			break;
+		limits->remaining_language_tags--;
 
+		const char *lang = p_strdup(pool, str_c(str));
 		array_push_back(&langs, &lang);
 		str_truncate(str, 0);
 
@@ -478,7 +494,8 @@ parse_content_language(struct message_part_data *data,
 
 static void
 parse_content_header(struct message_part_data *data,
-	pool_t pool, struct message_header_line *hdr)
+	pool_t pool, struct message_header_line *hdr,
+	struct message_part_data_limits *limits)
 {
 	const char *name = hdr->name + strlen("Content-");
 
@@ -507,7 +524,7 @@ parse_content_header(struct message_part_data *data,
 	case 't':
 	case 'T':
 		if (strcasecmp(name, "Type") == 0 && data->content_type == NULL)
-			parse_content_type(data, pool, hdr);
+			parse_content_type(data, pool, hdr, limits);
 		else if (strcasecmp(name, "Transfer-Encoding") == 0 &&
 			 data->content_transfer_encoding == NULL)
 			parse_content_transfer_encoding(data, pool, hdr);
@@ -518,7 +535,7 @@ parse_content_header(struct message_part_data *data,
 		if (strcasecmp(name, "Language") == 0 &&
 		    data->content_language == NULL) {
 			parse_content_language(data, pool,
-				hdr->full_value, hdr->full_value_len);
+				hdr->full_value, hdr->full_value_len, limits);
 		} else if (strcasecmp(name, "Location") == 0 &&
 			   data->content_location == NULL) {
 			data->content_location =
@@ -536,7 +553,7 @@ parse_content_header(struct message_part_data *data,
 						      hdr->full_value_len);
 		else if (strcasecmp(name, "Disposition") == 0 &&
 			 data->content_disposition_params == NULL)
-			parse_content_disposition(data, pool, hdr);
+			parse_content_disposition(data, pool, hdr, limits);
 		break;
 	default:
 		break;
@@ -545,6 +562,7 @@ parse_content_header(struct message_part_data *data,
 
 void message_part_data_parse_from_header(pool_t pool,
 	struct message_part *part,
+	struct message_part_data_limits *limits,
 	struct message_header_line *hdr)
 {
 	struct message_part_data *part_data;
@@ -584,13 +602,14 @@ void message_part_data_parse_from_header(pool_t pool,
 
 	if (str_begins_icase_with(hdr->name, "Content-")) {
 		T_BEGIN {
-			parse_content_header(part_data, pool, hdr);
+			parse_content_header(part_data, pool, hdr, limits);
 		} T_END;
 	}
 
 	if (parent_rfc822) {
 		/* message/rfc822, we need the envelope */
-		message_part_envelope_parse_from_header(pool, &part_data->envelope, hdr);
+		message_part_envelope_parse_from_header(pool, &part_data->envelope,
+							limits, hdr);
 	}
 }
 

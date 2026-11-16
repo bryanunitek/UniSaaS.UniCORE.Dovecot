@@ -1,4 +1,4 @@
-/* Copyright (c) 2004-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "auth-common.h"
 #include "userdb.h"
@@ -111,10 +111,11 @@ static void sql_query_callback(struct sql_result *sql_result,
 	i_free(sql_request);
 }
 
-static const char *userdb_sql_escape(const char *str, void *context)
+static int userdb_sql_escape(const char *str, const char **output_r,
+			     void *context, const char **error_r)
 {
 	struct sql_db *db = context;
-	return sql_escape_string(db, str);
+	return sql_escape_string(db, str, output_r, error_r);
 }
 
 static void userdb_sql_lookup(struct auth_request *auth_request,

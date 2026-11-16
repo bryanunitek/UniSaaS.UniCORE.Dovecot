@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -181,7 +181,6 @@ void dsasl_clients_init(void)
 	dsasl_client_mech_register(&dsasl_client_mech_digest_md5);
 	dsasl_client_mech_register(&dsasl_client_mech_cram_md5);
 	dsasl_client_mech_register(&dsasl_client_mech_oauthbearer);
-	dsasl_client_mech_register(&dsasl_client_mech_otp);
 	dsasl_client_mech_register(&dsasl_client_mech_xoauth2);
 	dsasl_client_mech_register(&dsasl_client_mech_scram_sha_1);
 	dsasl_client_mech_register(&dsasl_client_mech_scram_sha_1_plus);

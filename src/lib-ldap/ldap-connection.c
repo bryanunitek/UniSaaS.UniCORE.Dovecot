@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -353,25 +353,45 @@ static
 void ldap_connection_abort_request(struct ldap_op_queue_entry *req)
 {
 	struct ldap_result res;
+	struct ldap_connection *conn = req->conn;
 
 	/* too bad */
 	timeout_remove(&req->to_abort);
 	if (req->msgid > -1)
-		ldap_abandon_ext(req->conn->conn, req->msgid, NULL, NULL);
+		ldap_abandon_ext(conn->conn, req->msgid, NULL, NULL);
 
 	i_zero(&res);
 	res.openldap_ret = LDAP_TIMEOUT;
-	res.error_string = "Aborting LDAP request after timeout";
+	/* If the connection never reached a usable (bound) state, the request
+	   timed out while still connecting rather than while waiting for a
+	   server reply. Point at that, and if TLS is in use mention the
+	   certificate: some libldap TLS backends (e.g. GnuTLS) do not report a
+	   handshake or certificate verification failure back to us at all, so
+	   such a failure only ever surfaces as this timeout. */
+	if (conn->state == LDAP_STATE_CONNECT)
+		res.error_string = "Aborting LDAP request after timeout";
+	else if (conn->set->starttls ||
+		 strstr(conn->set->uris, "ldaps://") != NULL) {
+		res.error_string = t_strdup_printf(
+			"Aborting LDAP request: timeout while connecting (uris=%s) - "
+			"check that the LDAP server is reachable and its TLS certificate is trusted",
+			conn->set->uris);
+	} else {
+		res.error_string = t_strdup_printf(
+			"Aborting LDAP request: timeout while connecting (uris=%s) - "
+			"check that the LDAP server is reachable",
+			conn->set->uris);
+	}
 	if (req->result_callback != NULL)
 		req->result_callback(&res, req->result_callback_ctx);
 
-	unsigned int n = aqueue_count(req->conn->request_queue);
+	unsigned int n = aqueue_count(conn->request_queue);
 	for (unsigned int i = 0; i < n; i++) {
 		struct ldap_op_queue_entry *arr_req =
-			array_idx_elem(&req->conn->request_array,
-				       aqueue_idx(req->conn->request_queue, i));
+			array_idx_elem(&conn->request_array,
+				       aqueue_idx(conn->request_queue, i));
 		if (req == arr_req) {
-			aqueue_delete(req->conn->request_queue, i);
+			aqueue_delete(conn->request_queue, i);
 			ldap_connection_request_destroy(&req);
 			return;
 		}

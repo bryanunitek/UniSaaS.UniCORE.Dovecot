@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "llist.h"
@@ -1442,6 +1442,11 @@ void smtp_server_connection_close(struct smtp_server_connection **_conn,
 
 	smtp_server_connection_disconnect(conn, reason);
 	smtp_server_connection_unref(&conn);
+}
+
+bool smtp_server_connection_is_closed(struct smtp_server_connection *conn)
+{
+	return conn->closed;
 }
 
 void smtp_server_connection_terminate(struct smtp_server_connection **_conn,

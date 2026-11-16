@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "auth-common.h"
 #include "array.h"
@@ -17,6 +17,7 @@
 #include "db-oauth2.h"
 #include "dcrypt.h"
 #include "dict.h"
+#include <time.h>
 
 #undef DEF
 #define DEF(type, name) \
@@ -24,11 +25,15 @@
 #define DEF_SECS(type, name) \
 	SETTING_DEFINE_STRUCT_##type("oauth2_"#name, name##_secs, struct auth_oauth2_settings)
 
+#define WARN_AUD_FALLBACK_PERIOD 600
+static time_t last_warned_aud_fallback = 0;
+
 static const struct setting_define auth_oauth2_setting_defines[] = {
 	DEF(STR, tokeninfo_url),
 	DEF(STR, grant_url),
 	DEF(STR, introspection_url),
 	DEF(BOOLLIST, scope),
+	DEF(BOOLLIST, audience),
 	DEF(ENUM, introspection_mode),
 	DEF(STR_NOVARS, username_validation_format),
 	DEF(STR, username_attribute),
@@ -53,6 +58,7 @@ static const struct auth_oauth2_settings auth_oauth2_default_settings = {
 	.grant_url = "",
 	.introspection_url = "",
 	.scope = ARRAY_INIT,
+	.audience = ARRAY_INIT,
 	.force_introspection = FALSE,
 	.introspection_mode = ":auth:get:post:local",
 	.username_validation_format = "%{user}",
@@ -419,6 +425,14 @@ db_oauth2_add_extra_fields(struct db_oauth2_request *req, const char **error_r)
 
 		for (unsigned int i = 0; i < n; i += 2)
 			auth_request_set_field(request, fields[i], fields[i + 1], NULL);
+
+		/* Snapshot userdb_reply so any subsequent passdb rollback (e.g.
+		   SCHEME_NOT_AVAILABLE from this same passdb on the SASL
+		   OAUTHBEARER path's credential-lookup leg) doesn't wipe the
+		   userdb_* fields we just set. extra_fields snapshot is taken
+		   by the caller (db_oauth2_process_fields). */
+		if (request->fields.userdb_reply != NULL)
+			auth_fields_snapshot(request->fields.userdb_reply);
 	}
 	settings_free(set);
 	event_unref(&event);
@@ -569,31 +583,76 @@ static bool
 db_oauth2_token_in_scope(struct db_oauth2_request *req,
 			 enum passdb_result *result_r, const char **error_r)
 {
-	bool found = TRUE;
-	if (!array_is_empty(&req->db->set->scope)) {
-		found = FALSE;
-		const char *value = auth_fields_find(req->fields, "scope");
-		bool has_scope = value != NULL;
-		if (!has_scope)
-			value = auth_fields_find(req->fields, "aud");
-		e_debug(authdb_event(req->auth_request),
-			"Token scope(s): %s",
-			value);
+	if (array_is_empty(&req->db->set->scope))
+		return TRUE;
+
+	const char *value = auth_fields_find(req->fields, "scope");
+	bool has_scope = value != NULL;
+	if (!has_scope && array_is_empty(&req->db->set->audience)) {
+		value = auth_fields_find(req->fields, "aud");
 		if (value != NULL) {
-			const char *wanted_scope;
-			const char *const *entries = has_scope ?
-				t_strsplit_spaces(value, " ") :
-				t_strsplit_tabescaped(value);
-			array_foreach_elem(&req->db->set->scope, wanted_scope) {
-				if ((found = str_array_find(entries, wanted_scope)))
-					break;
+			time_t t0 = time(NULL);
+			if (t0 - last_warned_aud_fallback > WARN_AUD_FALLBACK_PERIOD) {
+				e_warning(authdb_event(req->auth_request),
+					  "Token has no 'scope' claim; falling back to "
+					  "'aud' for scope check is deprecated - "
+					  "use oauth2_audience instead");
+				last_warned_aud_fallback = t0;
 			}
 		}
-		if (!found) {
-			*error_r = t_strdup_printf("Token is not valid for scope '%s'",
-						   req->db->oauth2_set.scope);
-			*result_r = PASSDB_RESULT_USER_DISABLED;
+	}
+	e_debug(authdb_event(req->auth_request),
+		"Token scope(s): %s", value);
+
+	bool found = FALSE;
+	if (value != NULL && *value != '\0') {
+		const char *const *entries = has_scope ?
+			t_strsplit_spaces(value, " ") :
+			t_strsplit_tabescaped(value);
+		const char *wanted;
+		found = TRUE;
+		array_foreach_elem(&req->db->set->scope, wanted) {
+			if (!str_array_find(entries, wanted)) {
+				found = FALSE;
+				break;
+			}
 		}
+	}
+	if (!found) {
+		*error_r = t_strdup_printf("Token is not valid for scope '%s'",
+			t_array_const_string_join(&req->db->set->scope, " "));
+		*result_r = PASSDB_RESULT_USER_DISABLED;
+	}
+	return found;
+}
+
+static bool
+db_oauth2_token_in_audience(struct db_oauth2_request *req,
+			    enum passdb_result *result_r, const char **error_r)
+{
+	if (array_is_empty(&req->db->set->audience))
+		return TRUE;
+
+	const char *value = auth_fields_find(req->fields, "aud");
+	e_debug(authdb_event(req->auth_request),
+		"Token audience(s): %s", value != NULL ? value : "(none)");
+
+	bool found = FALSE;
+	if (value != NULL && *value != '\0') {
+		const char *const *entries = t_strsplit_tabescaped(value);
+		const char *wanted;
+		found = TRUE;
+		array_foreach_elem(&req->db->set->audience, wanted) {
+			if (!str_array_find(entries, wanted)) {
+				found = FALSE;
+				break;
+			}
+		}
+	}
+	if (!found) {
+		*error_r = t_strdup_printf("Token audience does not include '%s'",
+			t_array_const_string_join(&req->db->set->audience, " "));
+		*result_r = PASSDB_RESULT_USER_DISABLED;
 	}
 	return found;
 }
@@ -606,7 +665,8 @@ static void db_oauth2_process_fields(struct db_oauth2_request *req,
 
 	if (db_oauth2_user_is_enabled(req, result_r, error_r) &&
 	    db_oauth2_validate_username(req, result_r, error_r) &&
-	    db_oauth2_token_in_scope(req, result_r, error_r)) {
+	    db_oauth2_token_in_scope(req, result_r, error_r) &&
+	    db_oauth2_token_in_audience(req, result_r, error_r)) {
 		/* The user has now been successfully authenticated,
 		   mark the request as such. This allows having no
 		   passdb in config. */

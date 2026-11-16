@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "imap-common.h"
 #include "connection.h"
@@ -537,9 +537,11 @@ imap_master_client_input_args(struct connection *conn, const char *const *args,
 		client_destroy(imap_client, "Client state initialization failed");
 		return -1;
 	case IMAP_STATE_INCONSISTENT:
+		e_debug(event, "imap-master: Unhibernation failed: %s", error);
 		event_unref(&event);
-		client_destroy(imap_client, "Client state inconsistent");
-		return 0;
+		client_disconnect_with_error(imap_client,
+			"IMAP session state is inconsistent, please relogin.");
+		return -1;
 	case IMAP_STATE_OK:
 		break;
 	}

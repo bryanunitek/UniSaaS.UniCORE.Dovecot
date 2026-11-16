@@ -68,6 +68,7 @@ struct master_service {
 	void *killed_context;
 
 	struct timeout *to_die;
+	unsigned int die_timeout_msecs;
 
 	master_service_avail_overflow_callback_t *avail_overflow_callback;
 	struct timeout *to_overflow_state, *to_overflow_call;
@@ -136,5 +137,8 @@ void master_service_haproxy_new(struct master_service *service,
 void master_service_haproxy_abort(struct master_service *service);
 
 void master_admin_clients_deinit(void);
+/* Wait for a while for master-admin connections that haven't sent their
+   command yet. */
+void master_admin_clients_wait_commands(void);
 
 #endif

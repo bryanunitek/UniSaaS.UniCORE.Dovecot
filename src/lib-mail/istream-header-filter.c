@@ -1,4 +1,4 @@
-/* Copyright (c) 2003-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -34,6 +34,7 @@ struct header_filter_istream {
 	struct ref_buffer *hdr_buf;
 	int snapshot_pending_refcount;
 	struct message_size header_size;
+	size_t max_header_block_size;
 	uoff_t skip_count;
 	uoff_t last_lf_offset;
 
@@ -80,7 +81,7 @@ static void ref_buffer_unref(struct ref_buffer **_ref_buffer)
 static void i_stream_header_filter_destroy(struct iostream_private *stream)
 {
 	struct header_filter_istream *mstream =
-		(struct header_filter_istream *)stream;
+		container_of(stream, struct header_filter_istream, istream.iostream);
 
 	if (mstream->hdr_ctx != NULL)
 		message_parse_header_deinit(&mstream->hdr_ctx);
@@ -212,6 +213,8 @@ static ssize_t read_header(struct header_filter_istream *mstream)
 		mstream->hdr_ctx =
 			message_parse_header_init(mstream->istream.parent,
 						  NULL, 0);
+		message_parse_header_set_limit(mstream->hdr_ctx,
+					       mstream->max_header_block_size);
 	}
 
 	/* remove skipped data from hdr_buf */
@@ -488,7 +491,7 @@ handle_end_body_with_lf(struct header_filter_istream *mstream, ssize_t ret)
 static ssize_t i_stream_header_filter_read(struct istream_private *stream)
 {
 	struct header_filter_istream *mstream =
-		(struct header_filter_istream *)stream;
+		container_of(stream, struct header_filter_istream, istream);
 	uoff_t v_offset;
 	ssize_t ret;
 
@@ -572,7 +575,7 @@ static void i_stream_header_filter_seek(struct istream_private *stream,
 					uoff_t v_offset, bool mark ATTR_UNUSED)
 {
 	struct header_filter_istream *mstream =
-		(struct header_filter_istream *)stream;
+		container_of(stream, struct header_filter_istream, istream);
 
 	if (stream->istream.v_offset == v_offset) {
 		/* just reset the input buffer */
@@ -622,7 +625,7 @@ static int
 i_stream_header_filter_stat(struct istream_private *stream, bool exact)
 {
 	struct header_filter_istream *mstream =
-		(struct header_filter_istream *)stream;
+		container_of(stream, struct header_filter_istream, istream);
 	const struct stat *st;
 	uoff_t old_offset;
 
@@ -690,7 +693,7 @@ i_stream_header_filter_snapshot(struct istream_private *stream,
 				struct istream_snapshot *prev_snapshot)
 {
 	struct header_filter_istream *mstream =
-		(struct header_filter_istream *)stream;
+		container_of(stream, struct header_filter_istream, istream);
 	struct header_filter_istream_snapshot *snapshot;
 
 	if (stream->buffer != mstream->hdr_buf->buf->data) {
@@ -727,6 +730,9 @@ i_stream_create_header_filter(struct istream *input,
 	mstream->pool = pool_alloconly_create(MEMPOOL_GROWING
 					      "header filter stream", 256);
 	mstream->istream.max_buffer_size = input->real_stream->max_buffer_size;
+	/* Default to no per-header block size limit. Callers that want one
+	   call i_stream_header_filter_set_max_header_block_size(). */
+	mstream->max_header_block_size = SIZE_MAX;
 
 	mstream->headers = headers_count == 0 ? NULL :
 		p_new(mstream->pool, const char *, headers_count);
@@ -772,7 +778,8 @@ i_stream_create_header_filter(struct istream *input,
 	mstream->istream.istream.blocking = input->blocking;
 	mstream->istream.istream.seekable = input->seekable;
 
-	return i_stream_create(&mstream->istream, input, -1, 0);
+	return i_stream_create(&mstream->istream, input, -1,
+			       ISTREAM_HIDDEN_INPUTS_NONE, 0);
 }
 
 void i_stream_header_filter_add(struct header_filter_istream *input,
@@ -781,4 +788,18 @@ void i_stream_header_filter_add(struct header_filter_istream *input,
 	hdr_buf_realloc_if_needed(input);
 	buffer_append(input->hdr_buf->buf, data, size);
 	input->headers_edited = TRUE;
+}
+
+void i_stream_header_filter_set_max_header_block_size(
+	struct istream *input, size_t max_header_block_size)
+{
+	struct header_filter_istream *mstream =
+		container_of(input->real_stream, struct header_filter_istream,
+			     istream);
+
+	mstream->max_header_block_size = max_header_block_size;
+	if (mstream->hdr_ctx != NULL) {
+		message_parse_header_set_limit(mstream->hdr_ctx,
+					       max_header_block_size);
+	}
 }

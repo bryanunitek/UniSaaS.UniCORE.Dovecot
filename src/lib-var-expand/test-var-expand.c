@@ -1,4 +1,4 @@
-/* Copyright (c) 2024 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -94,7 +94,7 @@ static void run_var_expand_tests(const struct var_expand_params *params,
 }
 
 static void test_var_expand_builtin_filters(void) {
-	test_begin("var_expand(buildin filters)");
+	test_begin("var_expand(builtin filters)");
 
 	const struct var_expand_table table[] = {
 		{ .key = "first", .value = "hello", },
@@ -256,6 +256,7 @@ static void test_var_expand_builtin_filters(void) {
 		{ .in = "%{user | index('@',-1)}", .out = "domain", .ret = 0 },
 		{ .in = "%{user | username(0)}", .out = "username: Too many positional parameters", .ret = -1 },
 		{ .in = "%{user | domain(0)}", .out = "domain: Too many positional parameters", .ret = -1 },
+		{ .in = "%{user | index('',0)}", .out = "Empty separator", .ret = -1 },
 		{ .in = "%{literal('hello@') | domain }", .out = "", .ret = 0 },
 		{ .in = "%{literal('@hello') | username }", .out = "", .ret = 0 },
 		{ .in = "%{literal('@') | domain }", .out = "", .ret = 0 },
@@ -287,6 +288,8 @@ static void test_var_expand_builtin_filters(void) {
 		{ .in = "%{first | md5 % 30 | hex(-4) }", .out = "1600", .ret = 0 },
 		{ .in = "%{\xce\xb8}", .out = "is theta", .ret = 0 },
 		{ .in = "%{\xff\xfe\xff}", .out = "Invalid UTF-8 string", .ret = -1 },
+		/* escape filter without escape_func */
+		{ .in = "%{first | escape}", .out = "No escape function available", .ret = -1 },
 	};
 
 	const struct var_expand_params params = {
@@ -751,7 +754,8 @@ static void test_var_expand_tables_arr(void)
 	test_end();
 }
 
-static const char *test_escape(const char *str, void *context)
+static int test_escape(const char *str, const char **output_r,
+		       void *context, const char **error_r ATTR_UNUSED)
 {
 	const char *escape_chars = context;
 	string_t *dest = t_str_new(strlen(str) + 2);
@@ -766,7 +770,8 @@ static const char *test_escape(const char *str, void *context)
 		}
 	}
 	str_append_c(dest, '\'');
-	return str_c(dest);
+	*output_r = str_c(dest);
+	return 0;
 }
 
 static void test_var_expand_escape(void)
@@ -833,6 +838,11 @@ static void test_var_expand_escape(void)
 		/* safe filter */
 		{ .in = "%{feisty}", "'\\' OR \\'1\\'=\\'1'", .ret = 0 },
 		{ .in = "%{clean|safe} and %{feisty}", "hello world and '\\' OR \\'1\\'=\\'1'", .ret = 0 },
+		{ .in = "%{clean|safe|upper}", .out = "safe filter must be last in the filter chain", .ret = -1 },
+		/* escape filter */
+		{ .in = "%{clean | escape}", .out = "'\\'hello world\\''", .ret = 0 },
+		{ .in = "%{clean | escape | safe}", .out = "'hello world'", .ret = 0 },
+		{ .in = "%{clean | escape | concat(' world') | safe}", .out = "'hello world' world", .ret = 0 },
 	};
 
 	const struct var_expand_params params = {
@@ -1429,6 +1439,153 @@ static void test_var_expand_split(void)
 	test_end();
 }
 
+static void test_var_expand_timestamp(void)
+{
+	test_begin("var_expand(timestamp)");
+
+	const struct var_expand_table table[] = {
+		{ .key = "ts", .value = "1749379200" },
+		{ .key = "tsfrac", .value = "1749379200.123456789" },
+		{ .key = "tsms", .value = "1700000000.5" },
+		{ .key = "epoch", .value = "0" },
+		{ .key = "bigsec", .value = "10000000000" },
+		{ .key = "tslong", .value = "1749379200.1234567891" },
+		{ .key = "ms", .value = "1700000000500" },
+		{ .key = "ns", .value = "1749379200123456789" },
+		{ .key = "word", .value = "hello" },
+		VAR_EXPAND_TABLE_END
+	};
+
+	const struct var_expand_test tests[] = {
+		/* epoch unit conversion */
+		{ .in = "%{ts | epoch}", .out = "1749379200", .ret = 0 },
+		{ .in = "%{ts | epoch('s')}", .out = "1749379200", .ret = 0 },
+		{ .in = "%{tsfrac | epoch}", .out = "1749379200", .ret = 0 },
+		{ .in = "%{tsfrac | epoch('s')}", .out = "1749379200", .ret = 0 },
+		{ .in = "%{tsfrac | epoch('ms')}", .out = "1749379200123", .ret = 0 },
+		{ .in = "%{tsfrac | epoch('us')}", .out = "1749379200123456", .ret = 0 },
+		{ .in = "%{tsfrac | epoch('ns')}", .out = "1749379200123456789", .ret = 0 },
+		/* fraction longer than ns precision is truncated */
+		{ .in = "%{tslong | epoch('ns')}", .out = "1749379200123456789", .ret = 0 },
+		/* fraction shorter than ns precision is zero-padded */
+		{ .in = "%{tsms | epoch('ms')}", .out = "1700000000500", .ret = 0 },
+		{ .in = "%{tsms | epoch('ns')}", .out = "1700000000500000000", .ret = 0 },
+		/* named unit parameter */
+		{ .in = "%{tsfrac | epoch(unit='ms')}", .out = "1749379200123", .ret = 0 },
+		/* epoch zero */
+		{ .in = "%{epoch | epoch('ns')}", .out = "0", .ret = 0 },
+		/* large seconds value: 's' is fine, but scaling overflows */
+		{ .in = "%{bigsec | epoch('s')}", .out = "10000000000", .ret = 0 },
+		{ .in = "%{bigsec | epoch('ns')}",
+		  .out = "out of range for unit 'ns'", .ret = -1 },
+		/* epoch errors */
+		{ .in = "%{ts | epoch('bogus')}",
+		  .out = "Unsupported unit 'bogus' for 'epoch'", .ret = -1 },
+		{ .in = "%{word | epoch('s')}",
+		  .out = "Invalid timestamp 'hello'", .ret = -1 },
+		{ .in = "%{ts2 | epoch('s')}", .out = "Unknown variable 'ts2'",
+		  .ret = -1 },
+		/* from_epoch: integer in a unit -> canonical sec.frac */
+		{ .in = "%{ts | from_epoch}", .out = "1749379200.000000000",
+		  .ret = 0 },
+		{ .in = "%{ts | from_epoch('s')}", .out = "1749379200.000000000",
+		  .ret = 0 },
+		{ .in = "%{ms | from_epoch('ms')}", .out = "1700000000.500000000",
+		  .ret = 0 },
+		{ .in = "%{ns | from_epoch('ns')}", .out = "1749379200.123456789",
+		  .ret = 0 },
+		{ .in = "%{ms | from_epoch(unit='ms')}",
+		  .out = "1700000000.500000000", .ret = 0 },
+		/* from_epoch round-trips with epoch */
+		{ .in = "%{ns | from_epoch('ns') | epoch('ns')}",
+		  .out = "1749379200123456789", .ret = 0 },
+		/* from_epoch errors */
+		{ .in = "%{ms | from_epoch('bogus')}",
+		  .out = "Unsupported unit 'bogus' for 'from_epoch'", .ret = -1 },
+		{ .in = "%{word | from_epoch('ms')}",
+		  .out = "Invalid timestamp 'hello'", .ret = -1 },
+		{ .in = "%{from_epoch('ms')}",
+		  .out = "from_epoch: No value to convert from epoch", .ret = -1 },
+		/* date formatting, default timezone is UTC */
+		{ .in = "%{ts | date('%Y-%m-%d %H:%M:%S')}",
+		  .out = "2025-06-08 10:40:00", .ret = 0 },
+		{ .in = "%{ts | date('%Y-%m-%d %H:%M:%S', 'utc')}",
+		  .out = "2025-06-08 10:40:00", .ret = 0 },
+		{ .in = "%{ts | date('%Y-%m-%d %H:%M:%S', 'gmt')}",
+		  .out = "2025-06-08 10:40:00", .ret = 0 },
+		{ .in = "%{ts | date(format='%H:%M', tz='utc')}",
+		  .out = "10:40", .ret = 0 },
+		{ .in = "%{epoch | date('%Y-%m-%d %H:%M:%S')}",
+		  .out = "1970-01-01 00:00:00", .ret = 0 },
+		/* fractional seconds are ignored by date */
+		{ .in = "%{tsms | date('%Y-%m-%d %H:%M:%S')}",
+		  .out = "2023-11-14 22:13:20", .ret = 0 },
+		/* from_epoch feeds date */
+		{ .in = "%{ms | from_epoch('ms') | date('%Y-%m-%d %H:%M:%S')}",
+		  .out = "2023-11-14 22:13:20", .ret = 0 },
+		/* date errors */
+		{ .in = "%{ts | date}", .out = "date: Missing date format",
+		  .ret = -1 },
+		{ .in = "%{ts | date('%H', 'mars')}",
+		  .out = "Unsupported timezone 'mars' for 'date'", .ret = -1 },
+		{ .in = "%{date('%H')}", .out = "date: No value to format as date",
+		  .ret = -1 },
+		/* chaining with other filters */
+		{ .in = "%{ts | date('%Y') | upper}", .out = "2025", .ret = 0 },
+		/* ISO 8601 / RFC 3339 formatting (UTC -> 'Z') */
+		{ .in = "%{ts | iso8601}", .out = "2025-06-08T10:40:00Z", .ret = 0 },
+		{ .in = "%{ts | iso8601('utc')}", .out = "2025-06-08T10:40:00Z",
+		  .ret = 0 },
+		{ .in = "%{ts | iso8601(tz='gmt')}", .out = "2025-06-08T10:40:00Z",
+		  .ret = 0 },
+		{ .in = "%{epoch | iso8601}", .out = "1970-01-01T00:00:00Z",
+		  .ret = 0 },
+		/* fractional seconds are ignored */
+		{ .in = "%{tsms | iso8601}", .out = "2023-11-14T22:13:20Z",
+		  .ret = 0 },
+		/* iso8601 errors */
+		{ .in = "%{ts | iso8601('mars')}",
+		  .out = "Unsupported timezone 'mars' for 'iso8601'", .ret = -1 },
+		{ .in = "%{iso8601}",
+		  .out = "iso8601: No value to format as ISO 8601", .ret = -1 },
+	};
+
+	const struct var_expand_params params = {
+		.table = table,
+	};
+
+	run_var_expand_tests(&params, tests, N_ELEMENTS(tests));
+
+	/* %{time:unix} returns the current time as <seconds>.<nanoseconds>;
+	   only the format can be checked deterministically. */
+	string_t *dest = t_str_new(64);
+	const char *error;
+	test_assert(var_expand(dest, "%{time:unix}", &params, &error) == 0);
+
+	const char *str = str_c(dest);
+	const char *dot = strchr(str, '.');
+	test_assert(dot != NULL);
+	if (dot != NULL) {
+		/* 9-digit nanosecond part */
+		test_assert(strlen(dot + 1) == 9);
+		intmax_t sec;
+		test_assert(str_to_intmax(t_strdup_until(str, dot), &sec) == 0);
+		/* sanity: after 2020-01-01 */
+		test_assert(sec > 1577836800);
+	}
+
+	/* %{time:unix} must round-trip through the epoch filter */
+	str_truncate(dest, 0);
+	test_assert(var_expand(dest, "%{time:unix | epoch('ms')}", &params,
+			       &error) == 0);
+	intmax_t msec;
+	test_assert(str_to_intmax(str_c(dest), &msec) == 0);
+
+	str_free(&dest);
+
+	test_end();
+}
+
 static void test_var_expand_to_string(void)
 {
 	const char *const test_cases[] = {
@@ -1480,6 +1637,7 @@ int main(int argc, char *const argv[])
 		test_var_expand_perc,
 		test_var_expand_set_copy,
 		test_var_expand_generate,
+		test_var_expand_timestamp,
 		test_var_expand_export_import,
 		test_var_expand_split,
 		test_var_expand_to_string,

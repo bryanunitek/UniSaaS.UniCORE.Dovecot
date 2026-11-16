@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "ioloop.h"
@@ -1419,16 +1419,12 @@ bool mailbox_is_autocreated(struct mailbox *box)
 {
 	if (box->inbox_user)
 		return TRUE;
-	if ((box->flags & MAILBOX_FLAG_AUTO_CREATE) != 0)
-		return TRUE;
 	return box->set != NULL &&
 		strcmp(box->set->autocreate, MAILBOX_SET_AUTO_NO) != 0;
 }
 
 bool mailbox_is_autosubscribed(struct mailbox *box)
 {
-	if ((box->flags & MAILBOX_FLAG_AUTO_SUBSCRIBE) != 0)
-		return TRUE;
 	return box->set != NULL &&
 		strcmp(box->set->autocreate, MAILBOX_SET_AUTO_SUBSCRIBE) == 0;
 }
@@ -2063,6 +2059,12 @@ static bool mailbox_try_undelete(struct mailbox *box)
 		   a loop: mdbox storage rebuild -> mailbox_open() ->
 		   mailbox_mark_index_deleted() -> mailbox_sync() ->
 		   mdbox storage rebuild. */
+		return FALSE;
+	}
+	if (box->index == NULL) {
+		/* mailbox_open() failed before the index was opened (e.g. the
+		   backend's delete failed and we're reverting the deletion).
+		   There's nothing to undelete. */
 		return FALSE;
 	}
 	if (mail_index_get_modification_time(box->index, &mtime) < 0)
@@ -3754,12 +3756,10 @@ int mailbox_mkdir(struct mailbox *box, const char *path,
 		  enum mailbox_list_path_type type)
 {
 	const struct mailbox_permissions *perm = mailbox_get_permissions(box);
-	const char *root_dir;
 
 	if (!perm->gid_origin_is_mailbox_path) {
 		/* mailbox root directory doesn't exist, create it */
-		root_dir = mailbox_list_get_root_forced(box->list, type);
-		if (mailbox_list_mkdir_root(box->list, root_dir, type) < 0) {
+		if (mailbox_list_mkdir_root(box->list, NULL, type) < 0) {
 			mail_storage_copy_list_error(box->storage, box->list);
 			return -1;
 		}
@@ -4030,10 +4030,18 @@ int mailbox_lock_file_create(struct mailbox *box, const char *lock_fname,
 		   be too large as a filename and creating the full directory
 		   structure would be pretty troublesome. It would also make
 		   it more difficult to perform the automated deletion of empty
-		   lock directories. */
+		   lock directories.
+		   The SHA1 is calculated from the namespace prefix concatenated
+		   with the mailbox name (prefix first, then name) to avoid
+		   collisions when multiple namespaces share the same
+		   mail_volatile_path. */
 		str_printfa(str, "%s/%s.", box->list->mail_set->mail_volatile_path,
 			    lock_fname);
-		sha1_get_digest(box->name, strlen(box->name), box_name_sha1);
+		struct sha1_ctxt ctx;
+		sha1_init(&ctx);
+		sha1_loop(&ctx, box->list->ns->prefix, box->list->ns->prefix_len);
+		sha1_loop(&ctx, box->name, strlen(box->name));
+		sha1_result(&ctx, box_name_sha1);
 		binary_to_hex_append(str, box_name_sha1, sizeof(box_name_sha1));
 		lock_path = str_c(str);
 		set.mkdir_mode = 0700;

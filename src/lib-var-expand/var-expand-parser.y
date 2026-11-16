@@ -1,4 +1,4 @@
-/* Copyright (c) 2024 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 %define api.pure full
 %define api.prefix {var_expand_parser_}
@@ -82,6 +82,10 @@ static const char *const filter_var_names[] = {
 	"lookup",
 	"if",
 	"calculate",
+	"epoch",
+	"from_epoch",
+	"date",
+	"iso8601",
 	NULL
 };
 

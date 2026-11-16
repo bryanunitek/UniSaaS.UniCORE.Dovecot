@@ -1,4 +1,4 @@
-/* Copyright (c) 2004-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "login-common.h"
 #include "connection.h"
@@ -354,6 +354,10 @@ login_proxy_set_destination(struct login_proxy *proxy, const char *host,
 	proxy->state_rec = login_proxy_state_get(proxy_state, &proxy->ip,
 						 proxy->port);
 
+	event_add_str(proxy->event, "dest_host", host);
+	event_add_ip(proxy->event, "dest_ip", ip);
+	event_add_int(proxy->event, "dest_port", port);
+
 	/* Include destination ip:port also in the log prefix */
 	event_set_append_log_prefix(
 		proxy->event,
@@ -571,9 +575,6 @@ int login_proxy_new(struct client *client, struct event *event,
 	/* add event fields */
 	event_add_ip(proxy->event, "source_ip",
 		     login_proxy_get_source_host(proxy));
-	event_add_ip(proxy->event, "dest_ip", &set->ip);
-	event_add_int(proxy->event, "dest_port", set->port);
-	event_add_str(event, "dest_host", set->host);
 	event_add_str(event, "master_user", client->proxy_master_user);
 
 	client_ref(client);
@@ -792,6 +793,11 @@ login_proxy_free_full(struct login_proxy **_proxy, const char *log_msg,
 		i_assert(log_msg != NULL || proxy->client->destroyed);
 		login_proxy_detached_unlink(proxy);
 
+		if (master_service_get_client_limit(master_service) == 1) {
+			/* matching set in login_proxy_detach() */
+			master_service_set_current_user(master_service, NULL);
+		}
+
 		if ((flags & LOGIN_PROXY_FREE_FLAG_DELAYED) != 0)
 			delay_ms = login_proxy_delay_disconnect(proxy);
 
@@ -850,6 +856,14 @@ bool login_proxy_failed(struct login_proxy *proxy, struct event *event,
 {
 	const char *log_prefix;
 	bool try_reconnect = TRUE;
+
+	if (type == LOGIN_PROXY_FAILURE_TYPE_AUTH_REDIRECT) {
+		proxy->redirect_callback(proxy->client, event, reason);
+		/* return value doesn't matter here, because we can't be
+		   coming from login_proxy_connect(). */
+		return FALSE;
+	}
+
 	event_add_str(event, "error", reason);
 
 	switch (type) {
@@ -882,11 +896,6 @@ bool login_proxy_failed(struct login_proxy *proxy, struct event *event,
 	case LOGIN_PROXY_FAILURE_TYPE_AUTH_TEMPFAIL:
 		log_prefix = "";
 		break;
-	case LOGIN_PROXY_FAILURE_TYPE_AUTH_REDIRECT:
-		proxy->redirect_callback(proxy->client, event, reason);
-		/* return value doesn't matter here, because we can't be
-		   coming from login_proxy_connect(). */
-		return FALSE;
 	default:
 		i_unreached();
 	}
@@ -1017,8 +1026,18 @@ void login_proxy_redirect_finish(struct login_proxy *proxy,
 	/* disconnect from current backend */
 	login_proxy_disconnect(proxy);
 
-	e_debug(proxy->event, "Redirecting to %s", net_ipport2str(ip, port));
+	struct event_passthrough *ef = event_create_passthrough(proxy->event)->
+		add_str("disconnect_reason", "Redirecting")->
+		add_str("disconnect_side", LOGIN_PROXY_SIDE_SELF)->
+		add_str("error_code", "proxy_dest_redirected")->
+		set_name("proxy_session_finished");
+	e_debug(ef->event(), "Redirecting to %s", net_ipport2str(ip, port));
+
 	login_proxy_set_destination(proxy, net_ip2addr(ip), ip, port);
+	struct event_passthrough *es = event_create_passthrough(proxy->event)->
+		set_name("proxy_session_started");
+	e_debug(es->event(), "Started redirected proxy session");
+
 	(void)login_proxy_connect(proxy);
 }
 
@@ -1284,6 +1303,17 @@ void login_proxy_detach(struct login_proxy *proxy)
 	DLLIST_REMOVE(&login_proxies_pending, proxy);
 	login_proxy_detached_link(proxy);
 
+	if (master_service_get_client_limit(master_service) == 1) {
+		/* High-security mode (one connection per process): doveadm kick
+		   reaches us as SIGTERM + KICK-USER-SIGNAL, which the master
+		   service signal handler matches against current_user. Set it so
+		   the kick is recognized and terminates this proxied connection.
+		   With client_limit>1 the kick uses the admin socket instead and
+		   current_user must stay unset. */
+		master_service_set_current_user(master_service,
+						client->virtual_user);
+	}
+
 	client->login_proxy = NULL;
 }
 
@@ -1366,6 +1396,11 @@ bool login_proxy_failed_because_invalid_cert(struct login_proxy *proxy)
 void login_proxy_input_halt(struct login_proxy *proxy)
 {
 	io_remove(&proxy->server_io);
+}
+
+bool login_proxy_multiplex_input_started(struct login_proxy *proxy)
+{
+	return proxy->multiplex_input != NULL;
 }
 
 void login_proxy_multiplex_input_start(struct login_proxy *proxy)
@@ -1479,13 +1514,23 @@ void login_proxy_init(const char *proxy_notify_pipe_path)
 void login_proxy_deinit(void)
 {
 	struct login_proxy *proxy;
+	const char *log_msg, *reason;
+
+	if (master_service_is_user_kicked(master_service)) {
+		/* The process is exiting because a proxied connection was
+		   kicked via SIGTERM (high-security mode), not because of a
+		   normal shutdown. Log it as such. */
+		log_msg = LOGIN_PROXY_KILL_PREFIX KILLED_BY_ADMIN_REASON;
+		reason = KILLED_BY_ADMIN_REASON;
+	} else {
+		log_msg = LOGIN_PROXY_KILL_PREFIX KILLED_BY_SHUTDOWN_REASON;
+		reason = KILLED_BY_SHUTDOWN_REASON;
+	}
 
 	while (login_proxies != NULL) {
 		proxy = login_proxies;
-		login_proxy_free_full(&proxy,
-			LOGIN_PROXY_KILL_PREFIX KILLED_BY_SHUTDOWN_REASON,
-			KILLED_BY_SHUTDOWN_REASON,
-			LOGIN_PROXY_SIDE_SELF, 0);
+		login_proxy_free_full(&proxy, log_msg, reason,
+				      LOGIN_PROXY_SIDE_SELF, 0);
 	}
 	i_assert(detached_login_proxies_count == 0);
 

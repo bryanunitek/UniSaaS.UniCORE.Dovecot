@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "login-common.h"
 #include "ioloop.h"
@@ -16,6 +16,11 @@
 #include "submission-proxy.h"
 
 #include <ctype.h>
+
+/* Maximum number of lines the backend may send in a single proxied AUTH
+   reply. Legitimate replies are one line (occasionally a few); this only
+   bounds a malicious backend from growing proxy_reply without limit. */
+#define SUBMISSION_PROXY_MAX_REPLY_LINES 128
 
 static const char *submission_proxy_state_names[] = {
 	"banner", "ehlo", "starttls", "tls-ehlo", "xclient", "xclient-ehlo", "authenticate"
@@ -514,12 +519,15 @@ int submission_proxy_parse_line(struct client *client, const char *line)
 	const char *suffix, *text = NULL, *enh_code = NULL;
 	unsigned int status = 0;
 
-	if ((line[3] != ' ' && line[3] != '-') ||
-	    str_parse_uint(line, &status, &text) < 0 ||
-	    status < 200 || status >= 560) {
+	const char *sep = NULL;
+	if (str_parse_uint(line, &status, &text) < 0 ||
+	    status < 200 || status >= 560 ||
+	    (*text != ' ' && *text != '-')) {
 		invalid_line = TRUE;
 	} else {
-		text++;
+		/* text points at the ' '/'-' separator following the status
+		   code; remember it before stepping past it */
+		sep = text++;
 
 		if ((subm_client->proxy_capability &
 		    SMTP_CAPABILITY_ENHANCEDSTATUSCODES) != 0)
@@ -536,7 +544,7 @@ int submission_proxy_parse_line(struct client *client, const char *line)
 				   LOGIN_PROXY_FAILURE_TYPE_PROTOCOL, reason);
 		return -1;
 	}
-	if (line[3] == ' ') {
+	if (sep != NULL && *sep == ' ') {
 		last_line = TRUE;
 		subm_client->proxy_reply_status = 0;
 	} else {
@@ -638,8 +646,17 @@ int submission_proxy_parse_line(struct client *client, const char *line)
 		subm_client->proxy_state = SUBMISSION_PROXY_XCLIENT_EHLO;
 		return 0;
 	case SUBMISSION_PROXY_AUTHENTICATE:
-		if (invalid_line)
-			break;
+		if (invalid_line) {
+			/* A malformed reply line here would fall through to the
+			   shared failure block below, which assumes proxy_reply
+			   was already created. Fail cleanly instead. */
+			const char *reason = t_strdup_printf(
+				"Invalid AUTH reply: %s", str_sanitize(line, 160));
+			login_proxy_failed(client->login_proxy,
+				login_proxy_get_event(client->login_proxy),
+				LOGIN_PROXY_FAILURE_TYPE_PROTOCOL, reason);
+			return -1;
+		}
 		if (status == 334 && client->proxy_sasl_client != NULL) {
 			/* continue SASL authentication */
 			if (submission_proxy_continue_sasl_auth(
@@ -648,9 +665,26 @@ int submission_proxy_parse_line(struct client *client, const char *line)
 			return 0;
 		}
 
-		i_assert(subm_client->proxy_reply == NULL);
-		subm_client->proxy_reply = smtp_server_reply_create(
-			command, status, enh_code);
+		/* The backend may answer the proxied AUTH with a multi-line
+		   reply, in which case this callback is invoked once per line
+		   with the reply still pending (!last_line). Create the reply
+		   on the first line and append the text of each subsequent
+		   line. Cap the number of continuation lines so a malicious
+		   backend can't grow proxy_reply without bound. */
+		if (++subm_client->proxy_reply_lines >
+		    SUBMISSION_PROXY_MAX_REPLY_LINES) {
+			const char *reason = t_strdup_printf(
+				"Backend sent too many AUTH reply lines (>%u)",
+				SUBMISSION_PROXY_MAX_REPLY_LINES);
+			login_proxy_failed(client->login_proxy,
+				login_proxy_get_event(client->login_proxy),
+				LOGIN_PROXY_FAILURE_TYPE_PROTOCOL, reason);
+			return -1;
+		}
+		if (subm_client->proxy_reply == NULL) {
+			subm_client->proxy_reply = smtp_server_reply_create(
+				command, status, enh_code);
+		}
 		smtp_server_reply_add_text(subm_client->proxy_reply, text);
 
 		if (!last_line)
@@ -692,7 +726,21 @@ int submission_proxy_parse_line(struct client *client, const char *line)
 	   be using only Dovecot as their backend :) */
 	enum login_proxy_failure_type failure_type =
 		LOGIN_PROXY_FAILURE_TYPE_AUTH_REPLIED;
-	if ((status / 100) == 4)
+	if (status == 421) {
+		/* The backend won't accept further AUTH attempts on this
+		   connection. If it signaled 4.7.0, the user's connection
+		   limit (mail_max_userip_connections) was reached; report
+		   that specifically. Otherwise treat as a generic auth
+		   reply (e.g. backend shutting down). The reply was
+		   prepared from the backend's 421 line; forward it to the
+		   client and detach the AUTH command. */
+		failure_type = (null_strcmp(enh_code, "4.7.0") == 0) ?
+			LOGIN_PROXY_FAILURE_TYPE_AUTH_LIMIT_REACHED_REPLIED :
+			LOGIN_PROXY_FAILURE_TYPE_AUTH_REPLIED;
+		i_assert(subm_client->proxy_reply != NULL);
+		smtp_server_reply_submit(subm_client->proxy_reply);
+		subm_client->auth_cmd = NULL;
+	} else if ((status / 100) == 4)
 		failure_type = LOGIN_PROXY_FAILURE_TYPE_AUTH_TEMPFAIL;
 	else if (!submission_proxy_handle_redirect(
 			client, status, enh_code, text, &failure_type, &text)) {
@@ -718,6 +766,7 @@ void submission_proxy_reset(struct client *client)
 	i_free_and_null(subm_client->proxy_xclient);
 	i_free(subm_client->proxy_sasl_ir);
 	subm_client->proxy_reply_status = 0;
+	subm_client->proxy_reply_lines = 0;
 	subm_client->proxy_reply = NULL;
 }
 

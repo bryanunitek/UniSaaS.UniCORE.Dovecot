@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "common.h"
 #include "array.h"
@@ -711,7 +711,7 @@ anvil_connection_handshake(struct anvil_connection *conn,
 
 	struct ostream *orig_output = conn->conn.output;
 	conn->conn.output = o_stream_create_multiplex(orig_output, SIZE_MAX,
-		OSTREAM_MULTIPLEX_FORMAT_PACKET);
+		OSTREAM_MULTIPLEX_FORMAT_STREAM);
 	o_stream_set_no_error_handling(conn->conn.output, TRUE);
 	o_stream_unref(&orig_output);
 

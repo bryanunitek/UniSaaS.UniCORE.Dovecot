@@ -353,7 +353,7 @@ AC_CHECK_FUNCS(flock pread setproctitle setresgid \
 	       getmntinfo setpriority quotactl getmntent kqueue kevent \
 	       backtrace_symbols walkcontext dirfd clearenv \
 	       malloc_usable_size glob fallocate posix_fadvise \
-	       getpeereid getpeerucred inotify_init timegm)
+	       getpeereid getpeerucred inotify_init timegm memrchr)
 
 AC_CHECK_HEADERS([valgrind/valgrind.h])
 
@@ -363,9 +363,8 @@ DOVECOT_TYPEOF
 DOVECOT_IOLOOP
 DOVECOT_NOTIFY
 AS_CASE(
-   ["$notify"],
-   [none],   [BUILD_IMAP_HIBERNATE=0],
-   [kqueue], [BUILD_IMAP_HIBERNATE=0],
+   ["$have_notify"],
+   [none], [BUILD_IMAP_HIBERNATE=0],
    [BUILD_IMAP_HIBERNATE=1])
 AS_IF([test "$BUILD_IMAP_HIBERNATE" = 1],
       AC_DEFINE(BUILD_IMAP_HIBERNATE,, [Build with imap hibernate]))
@@ -594,7 +593,6 @@ LIBDOVECOT_LA_LIBS='\
 	$(top_builddir)/src/lib-mail/libmail.la \
 	$(top_builddir)/src/lib-sasl/libsasl.la \
 	$(top_builddir)/src/lib-auth/libauth.la \
-	$(top_builddir)/src/lib-otp/libotp.la \
 	$(top_builddir)/src/lib-auth-client/libauth-client.la \
 	$(top_builddir)/src/lib-charset/libcharset.la \
 	$(top_builddir)/src/lib-ssl-iostream/libssl_iostream.la \
@@ -871,7 +869,6 @@ src/lib-mail/Makefile
 src/lib-master/Makefile
 src/lib-login/Makefile
 src/lib-program-client/Makefile
-src/lib-otp/Makefile
 src/lib-dovecot/Makefile
 src/lib-dovecot-gssapi/Makefile
 src/lib-dovecot-storage/Makefile

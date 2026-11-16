@@ -1,12 +1,19 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 /* @UNSAFE: whole file */
 
+#include "config.h"
+#ifdef HAVE_MEMRCHR
+#  define _GNU_SOURCE
+#endif
 #include "lib.h"
 #include "str.h"
 #include "printf-format-fix.h"
 #include "strfuncs.h"
 #include "array.h"
+#include "hash.h"
+#include "hmac.h"
+#include "sha2.h"
 
 #include <stdio.h>
 #include <limits.h>
@@ -196,7 +203,7 @@ char *vstrconcat(const char *str1, va_list args, size_t *ret_len)
 
 		if (i + len >= bufsize) {
 			/* need more memory */
-			bufsize = nearest_power(i + len + 1);
+			bufsize = nearest_power(MALLOC_ADD3(i, len, 1));
 			temp = t_buffer_reget(temp, bufsize);
 		}
 
@@ -597,6 +604,22 @@ int i_memcasecmp(const void *p1, const void *p2, size_t size)
 	return 0;
 }
 
+void *i_memrchr(const void *data, int c, size_t size)
+{
+#ifdef HAVE_MEMRCHR
+	return memrchr(data, c, size);
+#else
+	const unsigned char *p = data;
+
+	while (size > 0) {
+		size--;
+		if (p[size] == (unsigned char)c)
+			return (void *)(p + size);
+	}
+	return NULL;
+#endif
+}
+
 int i_strcmp_p(const char *const *p1, const char *const *p2)
 {
 	return strcmp(*p1, *p2);
@@ -635,6 +658,32 @@ bool str_equals_timing_almost_safe(const char *s1, const char *s2)
 	   above loop early. */
 	timing_safety_unoptimization = ret;
 	return ret == 0;
+}
+
+bool str_equals_hash_timing_safe(const char *s1, const char *s2)
+{
+	struct hmac_context ctx;
+	unsigned char digest1[SHA256_RESULTLEN];
+	unsigned char digest2[SHA256_RESULTLEN];
+
+	/* Compare HMAC-SHA256 digests of the inputs rather than the inputs
+	   themselves. The digest length is constant, so the subsequent
+	   mem_equals_timing_safe() leaks no length information. The HMAC
+	   times depend on the input lengths, but each side's length is either
+	   a deployment constant (for the secret) or already known to the
+	   attacker (for their own input), so neither leaks a useful signal.
+	   hash_iv keys the HMAC to prevent precomputation. */
+	hmac_init(&ctx, (const unsigned char *)&hash_iv, sizeof(hash_iv),
+		  &hash_method_sha256);
+	hmac_update(&ctx, s1, strlen(s1));
+	hmac_final(&ctx, digest1);
+
+	hmac_init(&ctx, (const unsigned char *)&hash_iv, sizeof(hash_iv),
+		  &hash_method_sha256);
+	hmac_update(&ctx, s2, strlen(s2));
+	hmac_final(&ctx, digest2);
+
+	return mem_equals_timing_safe(digest1, digest2, sizeof(digest1));
 }
 
 size_t
@@ -886,7 +935,7 @@ p_strarray_join_n(pool_t pool, const char *const *arr, unsigned int arr_len,
 
 	for (i = 0; i < arr_len; i++) {
 		len = strlen(arr[i]);
-		needed_space = pos + len + sep_len + 1;
+		needed_space = MALLOC_ADD(MALLOC_ADD3(pos, len, sep_len), 1);
 		if (needed_space > alloc_len) {
 			alloc_len = nearest_power(needed_space);
 			str = t_buffer_reget(str, alloc_len);

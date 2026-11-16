@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "auth-common.h"
 #include "passdb.h"
@@ -123,7 +123,7 @@ passwd_lookup_credentials(struct auth_request *request,
 
 	res = passwd_lookup(request, &pw);
 	if (res != PASSDB_RESULT_OK) {
-		callback(res, NULL, 0, request);
+		callback(res, NULL, 0, NULL, request);
 		return;
 	}
 	/* make sure we're using the username exactly as it's in the database */

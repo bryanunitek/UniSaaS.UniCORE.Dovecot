@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "login-common.h"
 #include "hex-binary.h"
@@ -58,6 +58,7 @@ static const char *client_auth_fail_code_reasons[] = {
 	"tried to use unsupported auth mechanism",
 	"tried to use disallowed cleartext auth",
 	"anonymous logins disabled",
+	"credentials contain control characters",
 };
 static_assert_array_size(client_auth_fail_code_reasons,
 			 CLIENT_AUTH_FAIL_CODE_COUNT);
@@ -73,6 +74,7 @@ static const char *client_auth_fail_code_event_reasons[] = {
 	"invalid_mech",
 	"cleartext_auth_disabled",
 	"anonymous_auth_disabled",
+	"invalid_credentials",
 };
 static_assert_array_size(client_auth_fail_code_event_reasons,
 			 CLIENT_AUTH_FAIL_CODE_COUNT);
@@ -464,6 +466,8 @@ void client_disconnect(struct client *client, const char *reason)
 	if (!client->login_success) {
 		bool unref = FALSE;
 
+		if (client->v.disconnect != NULL)
+			client->v.disconnect(client, reason);
 		io_remove(&client->io);
 		ssl_iostream_destroy(&client->ssl_iostream);
 		if (client->iostream_fd_proxy != NULL) {
@@ -529,8 +533,8 @@ void client_destroy(struct client *client, const char *reason)
 	} else if (client->auth_request != NULL ||
 		   client->anvil_query != NULL) {
 		i_assert(client->authenticating);
-		sasl_server_auth_abort(client,
-				       reason != NULL ? reason : "Aborted");
+		sasl_proxy_auth_abort(client,
+				      reason != NULL ? reason : "Aborted");
 	}
 	i_assert(!client->authenticating);
 	i_assert(client->auth_request == NULL);
@@ -646,6 +650,7 @@ bool client_unref(struct client **_client)
 	i_free(client->virtual_auth_user);
 	i_free(client->auth_mech_name);
 	i_free(client->last_proxy_auth_failure_reason);
+	i_free(client->proxy_last_host);
 	i_free(client->master_data_prefix);
 	pool_unref(&client->pool);
 
@@ -1050,6 +1055,11 @@ bool client_forward_decode_base64(struct client *client, const char *value)
 	string_t *str = t_str_new(MAX_BASE64_DECODED_SIZE(value_len));
 	if (base64_decode(value, value_len, str) < 0)
 		return FALSE;
+	/* Embedded NUL would yield a created-but-empty array, panicking later
+	   in array_front() during sasl_server_auth_begin(). */
+	if (str_len(str) == 0 ||
+	    memchr(str_data(str), '\0', str_len(str)) != NULL)
+		return FALSE;
 
 	char **_fields = p_strsplit_tabescaped(client->preproxy_pool,
 					       str_c(str));
@@ -1253,7 +1263,7 @@ get_var_expand_params(struct client *client)
 	var_expand_table_set_value(tab, "real_local_ip",
 			net_ip2addr(&client->real_local_ip));
 	var_expand_table_set_value(tab, "real_remote_ip",
-			net_ip2addr(&client->real_local_ip));
+			net_ip2addr(&client->real_remote_ip));
 	var_expand_table_set_value(tab, "real_local_port",
 			dec2str(client->real_local_port));
 	var_expand_table_set_value(tab, "real_remote_port",
@@ -1543,9 +1553,10 @@ bool client_get_extra_disconnect_reason(struct client *client,
 			last_reason = "temporary authentication failure";
 			break;
 		case LOGIN_PROXY_FAILURE_TYPE_AUTH_REDIRECT:
-			event_reason = "redirected";
-			last_reason = "redirected";
-			break;
+			/* Redirects fire proxy_session_finished directly with
+			   error_code=proxy_dest_redirected, so this is
+			   unreachable. */
+			i_unreached();
 		case LOGIN_PROXY_FAILURE_TYPE_AUTH_LIMIT_REACHED_REPLIED:
 			event_reason = "connection_limit";
 			last_reason = "connection limit reached";
@@ -1555,7 +1566,9 @@ bool client_get_extra_disconnect_reason(struct client *client,
 		}
 		/* Authentication to the next hop failed. */
 		*event_reason_r = t_strdup_printf("proxy_dest_%s", event_reason);
-		last_reason = t_strdup_printf("proxy dest %s", last_reason);
+		last_reason = t_strdup_printf("proxy dest %s to %s",
+					      last_reason,
+					      client->proxy_last_host == NULL ? "(unknown)" : client->proxy_last_host);
 	} else if (client->auth_login_limit_reached) {
 		*event_reason_r = "connection_limit";
 		last_reason = "connection limit reached";
@@ -1648,6 +1661,11 @@ void client_notify_status(struct client *client, bool bad, const char *text)
 		client->v.notify_status(client, bad, text);
 }
 
+static void client_send_raw_data_destroy(struct client *client)
+{
+	client_destroy(client, "Disconnected: Output error");
+}
+
 void client_common_send_raw_data(struct client *client,
 				 const void *data, size_t size)
 {
@@ -1658,8 +1676,18 @@ void client_common_send_raw_data(struct client *client,
 		/* either disconnection or buffer full. in either case we want
 		   this connection destroyed. however destroying it here might
 		   break things if client is still tried to be accessed without
-		   being referenced.. */
+		   being referenced, so do it lazily from a timeout. */
+		io_remove(&client->io);
 		i_stream_close(client->input);
+		/* If the client is already being destroyed, don't schedule
+		   another destroy. Its to_disconnect was already removed and
+		   wouldn't be cleaned up again, leaking the timeout. */
+		if (!client->destroyed) {
+			timeout_remove(&client->to_disconnect);
+			client->to_disconnect =
+				timeout_add_short(0,
+					client_send_raw_data_destroy, client);
+		}
 	}
 }
 

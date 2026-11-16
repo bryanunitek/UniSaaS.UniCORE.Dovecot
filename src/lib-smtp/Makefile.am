@@ -102,6 +102,7 @@ endif
 noinst_PROGRAMS += $(fuzz_programs) $(test_nocheck_programs)
 
 EXTRA_DIST = \
+	fuzz-smtp-server.dict \
 	test-bin/sendmail-exit-1.sh \
 	test-bin/sendmail-success.sh
 
@@ -123,7 +124,6 @@ test_libs = \
 	../lib-dcrypt/libdcrypt.la \
 	../lib-dict/libdict.la \
 	../lib-auth/libauth.la \
-	../lib-otp/libotp.la \
 	../lib-json/libjson.la \
 	../lib-var-expand/libvar_expand.la \
 	../lib-regex/libdregex.la \

@@ -1,4 +1,4 @@
-/* Copyright (c) 2020 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "buffer.h"
@@ -115,9 +115,17 @@ get_time_field(const struct json_tree *tree, const char *key,
 	return -1;
 }
 
-/* Escapes '/' and '%' in identifier to %hex */
+/* Escapes '/' and '%' in identifier to %hex, and a whole-segment "." or
+   ".." to %2e[%2e] */
 static const char *escape_identifier(const char *identifier)
 {
+	/* A bare "." or ".." identifier would form a relative path component
+	   in the shared/<azp>/<alg>/<kid> dict key. */
+	if (strcmp(identifier, ".") == 0)
+		return "%2e";
+	if (strcmp(identifier, "..") == 0)
+		return "%2e%2e";
+
 	size_t pos = strcspn(identifier, "/%");
 
 	/* nothing to escape */
@@ -387,6 +395,9 @@ oauth2_jwt_copy_fields(ARRAY_TYPE(oauth2_field) *fields,
 
 			if (!json_node_is_singular(jnode)) {
 				root = array_append_space(&nodes);
+				/* array_append_space() may have reallocated the
+				   buffer, so refresh subroot to the new location. */
+				subroot = array_front(&nodes);
 				root->root = json_tree_node_get_child(tnode);
 				root->array = json_node_is_array(jnode);
 				if (jnode->name == NULL)
@@ -645,6 +656,10 @@ int oauth2_try_parse_jwt(const struct oauth2_settings *set,
 	struct json_tree *body_tree;
 	buffer_t *body =
 		t_base64url_decode_str(BASE64_DECODE_FLAG_NO_PADDING, blobs[1]);
+	if (body->used == 0) {
+		*error_r = "Not a JWT token";
+		return -1;
+	}
 	if (oauth2_json_tree_build(body, &body_tree, error_r) == -1)
 		return -1;
 	ret = oauth2_jwt_body_process(set, alg, kid, fields, body_tree, blobs,

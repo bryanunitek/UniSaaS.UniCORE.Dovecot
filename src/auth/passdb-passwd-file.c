@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "auth-common.h"
 #include "passdb.h"
@@ -130,12 +130,12 @@ passwd_file_lookup_credentials(struct auth_request *request,
 				    request->set->username_format, &pu);
 	if (ret <= 0) {
 		callback(ret < 0 ? PASSDB_RESULT_INTERNAL_FAILURE :
-			 PASSDB_RESULT_USER_UNKNOWN, NULL, 0, request);
+			 PASSDB_RESULT_USER_UNKNOWN, NULL, 0, NULL, request);
 		return;
 	}
 
 	if (passwd_file_save_results(request, pu, &crypted_pass, &scheme) < 0) {
-		callback(PASSDB_RESULT_INTERNAL_FAILURE, NULL, 0, request);
+		callback(PASSDB_RESULT_INTERNAL_FAILURE, NULL, 0, NULL, request);
 		return;
 	}
 

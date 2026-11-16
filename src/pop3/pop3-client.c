@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "pop3-common.h"
 #include "array.h"
@@ -78,7 +78,7 @@ static void client_idle_timeout(struct client *client)
 {
 	if (client->cmd != NULL) {
 		client_destroy(client, t_strdup_printf(
-			"Client has not read server output for for %"PRIdTIME_T" secs",
+			"Client has not read server output for %"PRIdTIME_T" secs",
 			ioloop_time - client->last_output));
 	} else {
 		client_send_line(client, "-ERR Disconnected for inactivity.");

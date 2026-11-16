@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2023 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -1051,6 +1051,18 @@ settings_mmap_apply_blob(struct settings_apply_ctx *ctx,
 		    ctx->info->defines[key_idx].type == SET_BOOLLIST) {
 			list_key = (const char *)mmap->mmap_base + offset;
 			offset += strlen(list_key)+1;
+			/* Keys from the config are trusted, so expand their
+			   %variables the same way the values are expanded. This
+			   is done before the has_key() check so deduplication
+			   operates on the final key. */
+			const char *error;
+			if (settings_var_expand(ctx, key_idx, &list_key,
+						&error) < 0) {
+				*error_r = t_strdup_printf(
+					"Failed to expand %s list key variables: %s",
+					ctx->info->defines[key_idx].key, error);
+				return -1;
+			}
 			set_apply = set_apply &&
 				!settings_parse_list_has_key(ctx->parser,
 					key_idx, settings_section_unescape(list_key));
@@ -1750,7 +1762,7 @@ settings_mmap_lookup_key(struct settings_mmap *mmap, const char *key,
 		return settings_mmap_registered_lookup_key(key, type_r);
 
 	/* Look it up from hash table */
-	uint32_t key_hash = (mmap->all_keys_hash_key_prefix ^ str_hash(key)) %
+	uint32_t key_hash = (mmap->all_keys_hash_key_prefix ^ str_stable_hash(key)) %
 		mmap->all_keys_hash_count;
 	uint32_t rel_offset = mmap->all_keys_hash[key_hash];
 	if (rel_offset == 0)
@@ -2175,7 +2187,7 @@ settings_instance_override_add_default(struct settings_apply_ctx *ctx,
 		pool_ref(set->pool);
 		if (event_filter_parse_case_sensitive(filter_string,
 						      set->filter, &error) < 0) {
-			i_panic("BUG: Failed to create event filter filter for %s: %s (%s)",
+			i_panic("BUG: Failed to create event filter for %s: %s (%s)",
 				set->orig_key, error, filter_string);
 		}
 		if (array_set->filter != EVENT_FILTER_MATCH_ALWAYS) {
@@ -2392,6 +2404,25 @@ settings_instance_override(struct settings_apply_ctx *ctx,
 			const char *suffix;
 			if (!str_begins(key, ctx->info->defines[key_idx].key, &suffix))
 				i_unreached();
+			if (suffix[0] == '/' &&
+			    set->type == SETTINGS_OVERRIDE_TYPE_DEFAULT) {
+				/* Expand %variables in the key, but only for
+				   default overrides - the same way the value is
+				   expanded below. -o and userdb overrides keep
+				   their keys (and values) literal. Done before
+				   has_key() so dedup uses the final key. */
+				const char *exp_key = suffix + 1, *error;
+				if (settings_var_expand(ctx, key_idx, &exp_key,
+							&error) < 0) {
+					*error_r = t_strdup_printf(
+						"Failed to expand default setting %s key variables: %s",
+						key, error);
+					return -1;
+				}
+				key = t_strconcat(ctx->info->defines[key_idx].key,
+						  "/", exp_key, NULL);
+				suffix = key + strlen(ctx->info->defines[key_idx].key);
+			}
 			if (suffix[0] != '/') {
 				/* replace full boollist setting
 				   (invalid for strlist) */
@@ -2471,9 +2502,22 @@ settings_instance_override(struct settings_apply_ctx *ctx,
 			else if (ctx->instance->pool != NULL)
 				pool_add_external_ref(&ctx->mpool->pool, ctx->instance->pool);
 		}
+		/* An empty built-in default for a setting that can't be empty
+		   (e.g. a number or time) means "no default": leave the value
+		   to be inherited from a less specific filter instead of
+		   failing. This lets a named filter keep a default-settings
+		   entry - so settings-history can override the value for old
+		   config versions - without forcing that value for current
+		   versions. The config process handles this equivalently in
+		   config_apply_exact_line(). */
+		bool empty_default =
+			set->type == SETTINGS_OVERRIDE_TYPE_DEFAULT &&
+			value[0] == '\0';
 		if (ctx->info->setting_apply != NULL &&
 		    !ctx->info->setting_apply(ctx->event, ctx->set_struct, key,
 					      &value, apply_flags, error_r)) {
+			if (empty_default)
+				continue;
 			*error_r = t_strdup_printf(
 				"Failed to override configuration from %s: "
 				"Invalid %s=%s: %s",
@@ -2483,6 +2527,8 @@ settings_instance_override(struct settings_apply_ctx *ctx,
 		}
 		if (settings_parse_keyidx_value_nodup(ctx->parser, key_idx, key,
 						      value) < 0) {
+			if (empty_default)
+				continue;
 			*error_r = t_strdup_printf(
 				"Failed to override configuration from %s: "
 				"Invalid %s=%s: %s",

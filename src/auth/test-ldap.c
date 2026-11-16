@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "test-auth.h"
 
@@ -25,8 +25,9 @@ static void test_ldap_escape(void)
 	};
 	test_begin("ldap_escape()");
 	for (unsigned int i = 0; i < N_ELEMENTS(tests); i++) {
-		test_assert_strcmp_idx(ldap_escape(tests[i].input, NULL),
-				       tests[i].output, i);
+		const char *output, *error;
+		test_assert(ldap_escape(tests[i].input, &output, NULL, &error) == 0);
+		test_assert_strcmp_idx(output, tests[i].output, i);
 	}
 	test_end();
 }

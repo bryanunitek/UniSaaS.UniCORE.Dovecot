@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "ioloop.h"
@@ -867,14 +867,8 @@ imapc_connection_handle_imap_resp_text(struct imapc_connection *conn,
 		return 0;
 
 	text = imap_args_to_str(args);
-	if (*text != '[') {
-		if (*text == '\0') {
-			imapc_connection_input_error(conn,
-				"Missing text in resp-text");
-			return -1;
-		}
+	if (*text != '[')
 		return 0;
-	}
 	return imapc_connection_handle_resp_text(conn, text, key_r, value_r);
 }
 

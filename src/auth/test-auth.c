@@ -1,4 +1,4 @@
-/* Copyright (c) 2024 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "test-auth.h"
 #include "test-dir.h"
@@ -16,7 +16,7 @@
 
 static const char *const settings[] = {
 	"auth_mechanisms",
-		"ANONYMOUS APOP CRAM-MD5 DIGEST-MD5 EXTERNAL LOGIN PLAIN OTP "
+		"ANONYMOUS APOP CRAM-MD5 DIGEST-MD5 EXTERNAL LOGIN PLAIN "
 		"OAUTHBEARER SCRAM-SHA-1 SCRAM-SHA-256 XOAUTH2",
 	"auth_username_chars", "",
 	"auth_username_format", "",

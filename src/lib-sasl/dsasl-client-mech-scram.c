@@ -1,4 +1,4 @@
-/* Copyright (c) 2020 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "sha1.h"
@@ -27,7 +27,7 @@ mech_scram_init_channel_binding(struct scram_dsasl_client *sclient,
 	else
 		type = SSL_CHANNEL_BIND_TYPE_TLS_UNIQUE;
 
-	if (dasl_client_get_channel_binding(client, type,
+	if (dsasl_client_get_channel_binding(client, type,
 					    &cbind_data, error_r) < 0)
 		return -1;
 

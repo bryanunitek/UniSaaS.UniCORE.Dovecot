@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "ioloop.h"
@@ -286,7 +286,26 @@ o_stream_multiplex_sendv(struct multiplex_ostream *mstream)
 	while((channel = get_next_channel(mstream)) != NULL) {
 		if (channel->buf->used == 0)
 			continue;
-		if (o_stream_get_buffer_avail_size(mstream->parent) < 6) {
+		/* Only the PACKET format needs this gate: it writes a whole
+		   header and its data in a single sendv and can't do a
+		   partial parent write, so it must wait until the parent has
+		   room for a full header. The STREAM format sends
+		   incrementally via pending_buf and handles partial parent
+		   writes, so it must attempt the send instead. It also must
+		   not be gated on get_buffer_avail_size() here: a parent with
+		   max_buffer_size==0 (as imap-fetch sets while streaming a
+		   body straight to the socket) always reports 0, which would
+		   wrongly block STREAM from writing to it. */
+		if (mstream->format == OSTREAM_MULTIPLEX_FORMAT_PACKET &&
+		    o_stream_get_buffer_avail_size(mstream->parent) < 6) {
+			/* A small avail here is normal backpressure: the
+			   parent buffer is temporarily full and will drain.
+			   But a parent whose max_buffer_size can't even hold
+			   a header can never drain enough for send_packet(),
+			   so it would just deadlock. Catch that (a
+			   max_buffer_size==0 streaming parent is unsupported
+			   for PACKET) loudly instead. */
+			i_assert(o_stream_get_max_buffer_size(mstream->parent) >= 6);
 			all_sent = 0;
 			break;
 		}
@@ -388,22 +407,38 @@ o_stream_multiplex_ochannel_sendv(struct ostream_private *stream,
 		container_of(stream, struct multiplex_ochannel, ostream);
 	size_t total = 0, avail = o_stream_get_buffer_avail_size(&stream->ostream);
 	size_t optimal_size = I_MIN(IO_BLOCK_SIZE, avail);
+	bool grown = FALSE;
 
 	for (unsigned int i = 0; i < iov_count; i++)
 		total += iov[i].iov_len;
 
-	if (avail < total && channel->buf->used < IO_BLOCK_SIZE) {
+	if (avail < total && channel->buf->used < IO_BLOCK_SIZE &&
+	    o_stream_get_buffer_used_size(channel->mstream->parent) == 0) {
 		/* ostream buffer size is too small for us - keep it always at
-		   least at IO_BLOCK_SIZE. */
+		   least at IO_BLOCK_SIZE. Only do this while the parent has no
+		   un-flushed data, i.e. the socket is keeping up. If the parent
+		   already has a backlog the socket is congested, and buffering
+		   more here would defeat backpressure: a max_buffer_size==0
+		   parent always reports avail==0, so without this the STREAM
+		   format would keep accepting data and busy-loop writing to a
+		   full socket instead of returning 0 to let the caller wait. */
 		avail = IO_BLOCK_SIZE - channel->buf->used;
+		grown = TRUE;
 	}
-	if (avail < total) {
+	if (avail < total && !grown) {
 		if (o_stream_multiplex_sendv(channel->mstream) < 0)
 			return -1;
 		avail = o_stream_get_buffer_avail_size(&stream->ostream);
 		if (avail == 0)
 			return 0;
 	}
+	/* If we grew the buffer above but a single sendv is still larger than
+	   IO_BLOCK_SIZE, don't refuse it entirely: buffer up to avail bytes so
+	   the caller makes forward progress. Otherwise a >IO_BLOCK_SIZE send
+	   (e.g. o_stream_send_istream() of an in-memory istream that returns all
+	   its data at once) would repeatedly buffer nothing and busy-loop. The
+	   remainder applies backpressure on the next call, when buf->used has
+	   reached IO_BLOCK_SIZE and the grow no longer triggers. */
 
 	total = 0;
 
@@ -513,8 +548,12 @@ static void o_stream_multiplex_try_destroy(struct multiplex_ostream *mstream)
 	/* Channel 0 was corked at destroy: transfer that cork back to
 	   the parent, mirroring the create-time transfer in the other
 	   direction so the caller's cork balance is preserved across
-	   the multiplex's lifetime. */
-	if (mstream->recork_parent_on_destroy) {
+	   the multiplex's lifetime. Skip the transfer if the parent
+	   failed or was closed: there is nothing left to preserve, and
+	   the parent may still be corked by us, because o_stream_uncork()
+	   is a no-op on a failed/closed stream. */
+	if (mstream->recork_parent_on_destroy &&
+	    !mstream->parent->closed && mstream->parent->stream_errno == 0) {
 		i_assert(!mstream->parent_corked);
 		multiplex_transfer_parent_cork(mstream->parent, TRUE);
 	}

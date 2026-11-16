@@ -1,4 +1,4 @@
-/* Copyright (c) 2023 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "str.h"
@@ -216,6 +216,7 @@ auth_sasl_request_verify_plain(struct sasl_server_req_ctx *rctx,
 static void
 lookup_credentials_callback(enum passdb_result status,
 			    const unsigned char *credentials, size_t size,
+			    const char *scheme ATTR_UNUSED,
 			    struct auth_request *request)
 {
 	const struct sasl_passdb_result result = {
@@ -241,30 +242,6 @@ auth_sasl_request_lookup_credentials(struct sasl_server_req_ctx *rctx,
 					lookup_credentials_callback);
 }
 
-static void
-set_credentials_callback(bool success, struct auth_request *request)
-{
-	const struct sasl_passdb_result result = {
-		.status = (success ?
-			   SASL_PASSDB_RESULT_OK :
-			   SASL_PASSDB_RESULT_INTERNAL_FAILURE),
-	};
-	request->sasl.passdb_callback(&request->sasl.req, &result);
-}
-
-static void
-auth_sasl_request_set_credentials(struct sasl_server_req_ctx *rctx,
-				  const char *scheme, const char *data,
-				  sasl_server_passdb_callback_t *callback)
-{
-	struct auth_request *request =
-		container_of(rctx, struct auth_request, sasl.req);
-
-	request->sasl.passdb_callback = callback;
-	auth_request_set_credentials(request, scheme, data,
-				     set_credentials_callback);
-}
-
 static const struct sasl_server_request_funcs auth_sasl_request_funcs = {
 	.request_set_authid = auth_sasl_request_set_authid,
 	.request_set_authzid = auth_sasl_request_set_authzid,
@@ -281,7 +258,6 @@ static const struct sasl_server_request_funcs auth_sasl_request_funcs = {
 
 	.request_verify_plain = auth_sasl_request_verify_plain,
 	.request_lookup_credentials = auth_sasl_request_lookup_credentials,
-	.request_set_credentials = auth_sasl_request_set_credentials,
 };
 
 static const char *
@@ -472,7 +448,6 @@ MECH_SIMPLE_REGISTER__TEMPLATE(cram_md5)
 MECH_SIMPLE_REGISTER__TEMPLATE(digest_md5)
 MECH_SIMPLE_REGISTER__TEMPLATE(external)
 MECH_SIMPLE_REGISTER__TEMPLATE(login)
-MECH_SIMPLE_REGISTER__TEMPLATE(otp)
 MECH_SIMPLE_REGISTER__TEMPLATE(plain)
 MECH_SIMPLE_REGISTER__TEMPLATE(scram_sha1)
 MECH_SIMPLE_REGISTER__TEMPLATE(scram_sha1_plus)
@@ -537,12 +512,6 @@ static const struct auth_sasl_mech_module mech_login = {
 	.mech_name = SASL_MECH_NAME_LOGIN,
 
 	.mech_register = mech_login_register,
-};
-
-static const struct auth_sasl_mech_module mech_otp = {
-	.mech_name = SASL_MECH_NAME_OTP,
-
-	.mech_register = mech_otp_register,
 };
 
 static const struct auth_sasl_mech_module mech_plain = {
@@ -612,7 +581,6 @@ static void auth_sasl_mechs_init(const struct auth_settings *set)
 	if (set->use_winbind)
 		auth_sasl_mech_register_module(&mech_winbind_ntlm);
 	auth_sasl_mech_oauth2_register();
-	auth_sasl_mech_register_module(&mech_otp);
 	auth_sasl_mech_register_module(&mech_plain);
 	auth_sasl_mech_register_module(&mech_scram_sha1);
 	auth_sasl_mech_register_module(&mech_scram_sha1_plus);
@@ -676,12 +644,6 @@ auth_sasl_mech_verify_passdb(const struct auth *auth,
 	case SASL_MECH_PASSDB_NEED_VERIFY_RESPONSE:
 	case SASL_MECH_PASSDB_NEED_LOOKUP_CREDENTIALS:
 		if (!auth_passdb_list_have_lookup_credentials(auth))
-			return FALSE;
-		break;
-	case SASL_MECH_PASSDB_NEED_SET_CREDENTIALS:
-		if (!auth_passdb_list_have_lookup_credentials(auth))
-			return FALSE;
-		if (!auth_passdb_list_have_set_credentials(auth))
 			return FALSE;
 		break;
 	}

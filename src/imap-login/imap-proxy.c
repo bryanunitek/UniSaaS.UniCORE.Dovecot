@@ -1,4 +1,4 @@
-/* Copyright (c) 2004-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "login-common.h"
 #include "array.h"
@@ -10,12 +10,14 @@
 #include "str-sanitize.h"
 #include "safe-memset.h"
 #include "compression.h"
+#include "ostream-zlib.h"
 #include "dsasl-client.h"
 #include "imap-login-client.h"
 #include "client-authenticate.h"
 #include "imap-resp-code.h"
 #include "imap-url.h"
 #include "imap-quote.h"
+#include "imap-util.h"
 #include "imap-proxy.h"
 
 static const char *imap_proxy_sent_state_names[] = {
@@ -370,8 +372,12 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 		imap_client->proxy_rcvd_state = IMAP_PROXY_RCVD_STATE_AUTH_CONTINUE;
 
 		str = t_str_new(128);
-		if (line[1] != ' ' ||
-		    base64_decode(line+2, strlen(line+2), str) < 0) {
+		/* RFC 3501/9051 require a space after '+', but some servers omit it.
+		   Accept the continuation either way. */
+		const char *sasl_value = line + 1;
+		if (*sasl_value == ' ')
+			sasl_value++;
+		if (base64_decode(sasl_value, strlen(sasl_value), str) < 0) {
 			const char *reason = t_strdup_printf(
 				"Invalid base64 data in AUTHENTICATE response");
 			login_proxy_failed(client->login_proxy,
@@ -390,7 +396,7 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 		imap_client->proxy_sent_state &= ENUM_NEGATE(IMAP_PROXY_SENT_STATE_STARTTLS);
 		imap_client->proxy_rcvd_state = IMAP_PROXY_RCVD_STATE_STARTTLS;
 
-		if (!str_begins_icase_with(suffix, "OK ")) {
+		if (!imap_reply_begins(suffix, "OK", NULL)) {
 			/* STARTTLS failed */
 			const char *reason = t_strdup_printf(
 				"STARTTLS failed: %s",
@@ -410,7 +416,7 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 			return -1;
 		o_stream_nsend(output, str_data(str), str_len(str));
 		return 1;
-	} else if (str_begins_icase(line, "L OK ", &suffix)) {
+	} else if (imap_reply_begins(line, "L OK", &suffix)) {
 		/* Login successful. Send this line to client. */
 		imap_client->proxy_sent_state &= ENUM_NEGATE(IMAP_PROXY_SENT_STATE_LOGIN);
 		imap_client->proxy_rcvd_state = IMAP_PROXY_RCVD_STATE_LOGIN;
@@ -487,7 +493,7 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 		/* Reply to CAPABILITY command we sent */
 		imap_client->proxy_sent_state &= ENUM_NEGATE(IMAP_PROXY_SENT_STATE_CAPABILITY);
 		imap_client->proxy_rcvd_state = IMAP_PROXY_RCVD_STATE_CAPABILITY;
-		if (str_begins_icase_with(line, "C OK ") &&
+		if (imap_reply_begins(line, "C OK", NULL) &&
 		    HAS_NO_BITS(imap_client->proxy_sent_state,
 				IMAP_PROXY_SENT_STATE_AUTHENTICATE |
 				IMAP_PROXY_SENT_STATE_LOGIN)) {
@@ -506,11 +512,14 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 		imap_client->proxy_sent_state &= ENUM_NEGATE(IMAP_PROXY_SENT_STATE_ID);
 		imap_client->proxy_rcvd_state = IMAP_PROXY_RCVD_STATE_ID;
 
-		if (str_begins_icase(line, "NO ["IMAP_RESP_CODE_SERVERBUG"] ", &line)) {
+		const char *serverbug_suffix;
+		if (imap_reply_begins(line, "NO ["IMAP_RESP_CODE_SERVERBUG"]",
+				      &serverbug_suffix)) {
 			login_proxy_failed(client->login_proxy,
 				login_proxy_get_event(client->login_proxy),
 				LOGIN_PROXY_FAILURE_TYPE_REMOTE_CONFIG,
-				t_strdup_printf("ID command failed: %s", line));
+				t_strdup_printf("ID command failed: %s",
+						serverbug_suffix));
 			return -1;
 		} else if (!str_begins_icase(line, "OK", &line)) {
 			e_debug(login_proxy_get_event(client->login_proxy),
@@ -549,10 +558,17 @@ int imap_proxy_parse_line(struct client *client, const char *line)
 				"MULTIPLEX started without being requested");
 			return -1;
 		}
+		if (login_proxy_multiplex_input_started(client->login_proxy)) {
+			login_proxy_failed(client->login_proxy,
+				login_proxy_get_event(client->login_proxy),
+				LOGIN_PROXY_FAILURE_TYPE_PROTOCOL,
+				"MULTIPLEX started twice");
+			return -1;
+		}
 		login_proxy_multiplex_input_start(client->login_proxy);
 		/* force caller to refresh istream */
 		return 1;
-	} else if (str_begins_icase_with(line, "* BYE ")) {
+	} else if (imap_reply_begins(line, "* BYE", NULL)) {
 		/* Login unexpectedly failed (due to some internal error).
 		   Don't forward the BYE to the client, since we're not going
 		   to disconnect it. It could be a possibility to convert these
@@ -631,13 +647,14 @@ proxy_side_cmd_compress(struct client *client, const char *const *args,
 		login_proxy_get_client_ostream(client->login_proxy);
 	const struct compression_handler *handler;
 	int ret = compression_lookup_handler(t_str_lcase(args[0]), &handler);
-	if (ret <= 0) {
-		/* IMAP backend normally checks this already. If we get here,
-		   there is a mismatch between what algorithms proxy and
-		   backend supports. */
+	/* Only DEFLATE is permitted. The IMAP backend restricts this already;
+	   enforce it here too, since imap-login handles COMPRESS for proxied
+	   connections and non-DEFLATE algorithms can be far more memory-heavy
+	   to decompress. */
+	if (ret <= 0 || strcmp(handler->name, "deflate") != 0) {
 		o_stream_nsend_str(client_output, t_strdup_printf(
 			"%s NO %s compression mechanism\r\n", args[1],
-			ret == 0 ? "Unsupported" : "Unknown"));
+			ret < 0 ? "Unknown" : "Unsupported"));
 		return 0;
 	}
 
@@ -655,11 +672,24 @@ proxy_side_cmd_compress(struct client *client, const char *const *args,
 	return 0;
 }
 
+static int
+proxy_side_cmd_dict_reset(struct client *client,
+			  const char *const *args ATTR_UNUSED,
+			  const char **error_r ATTR_UNUSED)
+{
+	struct ostream *client_output =
+		login_proxy_get_client_ostream(client->login_proxy);
+	o_stream_deflate_reset_dict(client_output);
+	return 0;
+}
+
 int imap_proxy_side_channel_input(struct client *client,
 				  const char *const *args, const char **error_r)
 {
 	if (strcmp(args[0], "compress") == 0)
 		return proxy_side_cmd_compress(client, args + 1, error_r);
+	else if (strcmp(args[0], "dict_reset") == 0)
+		return proxy_side_cmd_dict_reset(client, args + 1, error_r);
 	else {
 		*error_r = "Unsupported command";
 		return -1;

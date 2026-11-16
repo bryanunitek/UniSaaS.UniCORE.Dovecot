@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2025 Dovecot authors, see the included COPYING file
+# Copyright (c) Dovecot authors, see top-level COPYING file
 
 import argparse
 import bisect
@@ -44,6 +44,15 @@ ud_compositions_max_per_starter = 0
 
 ud_case_mappings = []
 ud_case_mapping_max_length = 0
+
+ud_bidi_class_short = {}
+
+ud_ccc_labels = []
+ud_joining_type_labels = []
+ud_script_names = []
+
+ud_idna_mappings = []
+ud_idna_mapping_max_length = 0
 
 
 class UCDFileOpen:
@@ -319,9 +328,25 @@ def read_ucd_files():
                 die(f"{ucd}:{line_num}: Missing columns")
 
             prop = cols[0].strip()
-            if prop == "dt":
+            if prop == "bc":
+                sval = cols[1].strip()
+                lval = cols[2].strip()
+                ud_bidi_class_short[lval] = sval
+            elif prop == "ccc":
+                num = int(cols[1].strip(), 10)
+                sval = cols[2].strip()
+                lval = cols[3].strip()
+                ud_ccc_labels.append((num, sval, lval))
+            elif prop == "dt":
                 lval = cols[2].strip()
                 ud_decomposition_type_names.append(lval)
+            elif prop == "jt":
+                sval = cols[1].strip()
+                lval = cols[2].strip()
+                ud_joining_type_labels.append((sval, lval))
+            elif prop == "sc":
+                lval = cols[2].strip()
+                ud_script_names.append(lval)
 
     # UnicodeData.txt
     with UCDFileOpen("UnicodeData.txt") as ucd:
@@ -476,6 +501,77 @@ def read_ucd_files():
             value = columns[2].strip()
             cpd = CodePointData()
             cpd.indic_conjunct_break = value
+            CodePointRange(cprng[0], cprng[1], cpd)
+
+    # DerivedBidiClass.txt
+    with UCDFileOpen("DerivedBidiClass.txt") as ucd:
+        line_num = 0
+        for line in ucd.fd:
+            line_num = line_num + 1
+            data = line.split("#")
+
+            if len(data) > 1 and data[1].startswith(" @missing: "):
+                missing = data[1]
+                missing = missing[11:]
+
+                cols = missing.split(";")
+                if len(cols) < 2:
+                    die(f"{ucd}:{line_num}: Missing columns in @missing definition")
+
+                cprng = parse_cp_range(cols[0])
+                if cprng is None:
+                    continue
+
+                bidi_class = ud_bidi_class_short[cols[1].strip()]
+                if bidi_class == "L":
+                    continue
+
+                cpd = CodePointData()
+                cpd.bidi_class = bidi_class
+                CodePointRange(cprng[0], cprng[1], cpd, default=True)
+                continue
+
+            line = data[0].strip()
+            if len(line) == 0:
+                continue
+
+            cols = line.split(";")
+            if len(cols) < 2:
+                die(f"{ucd}:{line_num}: Missing columns")
+
+            cprng = parse_cp_range(cols[0])
+            if cprng is None:
+                continue
+
+            bidi_class = cols[1].strip()
+            if bidi_class == "L":
+                continue
+
+            cpd = CodePointData()
+            cpd.bidi_class = bidi_class
+            CodePointRange(cprng[0], cprng[1], cpd)
+
+    # DerivedJoiningType.txt
+    with UCDFileOpen("DerivedJoiningType.txt") as ucd:
+        line_num = 0
+        for line in ucd.fd:
+            line_num = line_num + 1
+            data = line.split("#")
+            line = data[0].strip()
+            if len(line) == 0:
+                continue
+
+            cols = line.split(";")
+            if len(cols) < 2:
+                die(f"{ucd}:{line_num}: Missing columns")
+
+            cprng = parse_cp_range(cols[0])
+            if cprng is None:
+                continue
+
+            value = cols[1].strip()
+            cpd = CodePointData()
+            cpd.joining_type = value
             CodePointRange(cprng[0], cprng[1], cpd)
 
     # DerivedNormalizationProps.txt
@@ -633,6 +729,10 @@ def read_ucd_files():
                 cpd = CodePointData()
                 cpd.pb_g_white_space = True
                 CodePointRange(cprng[0], cprng[1], cpd)
+            elif prop == "Join_Control":
+                cpd = CodePointData()
+                cpd.pb_sr_join_control = True
+                CodePointRange(cprng[0], cprng[1], cpd)
             elif prop == "Pattern_White_Space":
                 cpd = CodePointData()
                 cpd.pb_i_pattern_white_space = True
@@ -653,6 +753,29 @@ def read_ucd_files():
                 cpd = CodePointData()
                 cpd.pb_m_terminal_punctuation = True
                 CodePointRange(cprng[0], cprng[1], cpd)
+
+    # Scripts.txt
+    with UCDFileOpen("Scripts.txt") as ucd:
+        line_num = 0
+        for line in ucd.fd:
+            line_num = line_num + 1
+            data = line.split("#")
+            line = data[0].strip()
+            if len(line) == 0:
+                continue
+
+            cols = line.split(";")
+            if len(cols) < 2:
+                die(f"{ucd}:{line_num}: Missing columns")
+
+            cprng = parse_cp_range(cols[0])
+            if cprng is None:
+                continue
+
+            value = cols[1].strip()
+            cpd = CodePointData()
+            cpd.script = value
+            CodePointRange(cprng[0], cprng[1], cpd)
 
     # SpecialCasing.txt
     with UCDFileOpen("SpecialCasing.txt") as ucd:
@@ -800,6 +923,59 @@ def read_ucd_files():
                 cpd = CodePointData()
                 cpd.pb_wb_extendnumlet = True
                 CodePointRange(cprng[0], cprng[1], cpd)
+
+    # IdnaMappingTable.txt
+    with UCDFileOpen("IdnaMappingTable.txt") as ucd:
+        line_num = 0
+        for line in ucd.fd:
+            line_num = line_num + 1
+            data = line.split("#")
+            line = data[0].strip()
+            if len(line) == 0:
+                continue
+
+            cols = line.split(";")
+            if len(cols) < 2:
+                die(f"{ucd}:{line_num}: Missing columns")
+
+            cprng = parse_cp_range(cols[0])
+            if cprng is None:
+                continue
+
+            status_label = cols[1].strip()
+            status = None
+            mapping = ""
+            if len(cols) >= 3:
+                mapping = cols[2].strip()
+
+            if status_label == "disallowed":
+                continue
+            elif status_label == "valid":
+                status = "UNICODE_IDNA_STATUS_VALID"
+            elif status_label == "ignored":
+                status = "UNICODE_IDNA_STATUS_IGNORED"
+            elif status_label == "mapped":
+                status = "UNICODE_IDNA_STATUS_MAPPED"
+            elif status_label == "deviation":
+                status = "UNICODE_IDNA_STATUS_DEVIATION"
+            else:
+                continue
+
+            cpd = CodePointData()
+            cpd.idna_status = status
+
+            codes_hex = mapping.split(" ")
+            if len(mapping) > 0 and len(codes_hex) > 0:
+                first_code_hex = codes_hex[0].strip()
+                first_code = int(first_code_hex, 16)
+                if len(codes_hex) > 1 or first_code != cp:
+                    codes = []
+                    for code_hex in codes_hex:
+                        codes.append(int(code_hex, 16))
+
+                    cpd.idna_mapping = codes
+
+            CodePointRange(cprng[0], cprng[1], cpd)
 
 
 def resolve_case_mappings():
@@ -1088,6 +1264,29 @@ def derive_canonical_compositions():
         ud_composition_primaries = ud_composition_primaries + [p[1] for p in mp]
 
 
+def resolve_idna_mappings():
+    global ud_codepoints
+    global ud_idna_mappings
+    global ud_idna_mapping_max_length
+
+    for cpr in ud_codepoints:
+        if cpr.cp_last > cpr.cp_first:
+            # No mappings in ranges expected, ever
+            continue
+        cp = cpr.cp_first
+        cpd = cpr.data
+
+        idna_codes = []
+        if hasattr(cpd, "idna_mapping"):
+            idna_codes = cpd.idna_mapping
+        if len(idna_codes) > 0 and (len(idna_codes) > 1 or idna_codes[0] != cp):
+            cpd.idna_mapping_offset = len(ud_idna_mappings)
+            cpd.idna_mapping_length = len(idna_codes)
+            ud_idna_mappings = ud_idna_mappings + idna_codes
+        if len(idna_codes) > ud_idna_mapping_max_length:
+            ud_idna_mapping_max_length = len(idna_codes)
+
+
 def create_cp_range_index():
     global ud_codepoints
     global ud_codepoints_index
@@ -1237,6 +1436,52 @@ def get_general_category_def(gc):
 def decomposition_type_def(dt):
     return "UNICODE_DECOMPOSITION_TYPE_%s" % dt.upper()
 
+def script_def(sc):
+    if sc is None:
+        return "UNICODE_SCRIPT_UNKNOWN"
+
+    sc_uc = sc.upper()
+    return "UNICODE_SCRIPT_%s" % sc_uc
+
+
+def joining_type_def(jt):
+    jt_uc = jt.upper()
+    return "UNICODE_JOINING_TYPE_%s" % jt_uc
+
+
+def bidi_class_def(cls):
+    cls_uc = cls.upper()
+
+    implemented = [
+        "AL",
+        "AN",
+        "B",
+        "BN",
+        "CS",
+        "EN",
+        "ES",
+        "ET",
+        "FSI",
+        "L",
+        "LRE",
+        "LRI",
+        "LRO",
+        "NSM",
+        "ON",
+        "PDF",
+        "PDI",
+        "R",
+        "RLE",
+        "RLI",
+        "RLO",
+        "S",
+        "WS",
+    ]
+    if cls_uc not in implemented:
+        cls_uc = "ON"
+
+    return "UNICODE_BIDI_CLASS_%s" % cls_uc
+
 
 def indic_conjunct_break_def(icb):
     icb_uc = icb.upper()
@@ -1281,6 +1526,7 @@ def write_tables_h():
     global ud_decomposition_max_length
     global ud_compositions_max_per_starter
     global ud_case_mapping_max_length
+    global ud_idna_mapping_max_length
 
     orig_stdout = sys.stdout
 
@@ -1301,6 +1547,7 @@ def write_tables_h():
             % ud_compositions_max_per_starter
         )
         print("#define UNICODE_CASE_MAPPING_MAX_LENGTH %s" % ud_case_mapping_max_length)
+        print("#define UNICODE_IDNA_MAX_MAPPING_LENGTH %s" % ud_idna_mapping_max_length)
         print("")
         print("extern const struct unicode_code_point_data unicode_code_points[];")
         print("")
@@ -1316,6 +1563,8 @@ def write_tables_h():
         print("")
         print("extern const uint32_t unicode_case_mappings[];")
         print("")
+        print("extern const uint32_t unicode_idna_mappings[];")
+        print("")
         print("#endif")
 
     sys.stdout = orig_stdout
@@ -1329,6 +1578,8 @@ def write_tables_c_cpd(cpd):
         )
     else:
         print("\t\t.general_category = UNICODE_GENERAL_CATEGORY_CN,")
+    if hasattr(cpd, "script"):
+        print("\t\t.script = %s," % script_def(cpd.script))
     if (
         hasattr(cpd, "canonical_combining_class")
         and cpd.canonical_combining_class > 0
@@ -1337,6 +1588,8 @@ def write_tables_c_cpd(cpd):
             "\t\t.canonical_combining_class = %u,"
             % cpd.canonical_combining_class
         )
+    if hasattr(cpd, "joining_type"):
+        print("\t\t.joining_type = %s," % joining_type_def(cpd.joining_type))
     if (
         hasattr(cpd, "nfd_quick_check")
         or hasattr(cpd, "nfkd_quick_check")
@@ -1440,6 +1693,13 @@ def write_tables_c_cpd(cpd):
             "\t\t.simple_titlecase_mapping = 0x%04X,"
             % cpd.simple_titlecase_mapping
         )
+    if hasattr(cpd, "idna_status"):
+        print("\t\t.idna_status = %s," % cpd.idna_status)
+    if hasattr(cpd, "idna_mapping_length") and cpd.idna_mapping_length > 0:
+        print("\t\t.idna_mapping_length = %s," % cpd.idna_mapping_length)
+        print("\t\t.idna_mapping_offset = %s," % cpd.idna_mapping_offset)
+    if hasattr(cpd, "bidi_class"):
+        print("\t\t.bidi_class = %s," % bidi_class_def(cpd.bidi_class))
     if hasattr(cpd, "indic_conjunct_break"):
         print(
             "\t\t.indic_conjunct_break = %s,"
@@ -1449,6 +1709,8 @@ def write_tables_c_cpd(cpd):
         print("\t\t.pb_g_white_space = TRUE,")
     if hasattr(cpd, "pb_e_extended_pictographic"):
         print("\t\t.pb_e_extended_pictographic = TRUE,")
+    if hasattr(cpd, "pb_sr_join_control"):
+        print("\t\t.pb_sr_join_control = TRUE,")
     if hasattr(cpd, "pb_i_pattern_white_space"):
         print("\t\t.pb_i_pattern_white_space = TRUE,")
     if hasattr(cpd, "pb_m_quotation_mark"):
@@ -1780,6 +2042,10 @@ def write_tables_c():
         print_list(ud_case_mappings)
         print(",")
         print("};")
+        print("")
+        print("const uint32_t unicode_idna_mappings[] = {")
+        print_list(ud_idna_mappings)
+        print("};")
 
     sys.stdout = orig_stdout
 
@@ -1799,6 +2065,49 @@ def write_types_h():
         print_top_message()
         print('#include "unicode-data-static.h"')
         print("")
+        print("/* Script */")
+        print("enum unicode_script {")
+        print("\t/* Unknown */")
+        print("\tUNICODE_SCRIPT_UNKNOWN = 0,")
+        print("\t/* Inherited */")
+        print("\tUNICODE_SCRIPT_INHERITED,")
+        print("\t/* Common */")
+        print("\tUNICODE_SCRIPT_COMMON,")
+        for sc in ud_script_names:
+            sc_uc = sc.upper()
+
+            if sc_uc == "UNKNOWN" or sc_uc == "INHERITED" or sc_uc == "COMMON":
+                continue
+
+            print("\t/* %s */" % sc)
+            print("\tUNICODE_SCRIPT_%s," % sc_uc)
+        print("};")
+        print("")
+        print("/* Canonical_Combining_Class */")
+        print("enum unicode_ccc {")
+        for cl in ud_ccc_labels:
+            (num, sval, lval) = cl
+            sval_uc = sval.upper()
+
+            print("\t/* %s */" % lval)
+            print("\tUNICODE_CCC_%s = %u," % (sval_uc, num))
+        print("};")
+        print("")
+        print("/* Joining_Type */")
+        print("enum unicode_joining_type {")
+        print("\t/* Non_Joining */")
+        print("\tUNICODE_JOINING_TYPE_U = 0,")
+        for jt in ud_joining_type_labels:
+            (sval, lval) = jt
+            sval_uc = sval.upper()
+
+            if sval_uc == "U":
+                continue
+
+            print("\t/* %s */" % lval)
+            print("\tUNICODE_JOINING_TYPE_%s," % sval_uc)
+        print("};")
+        print("")
         print("/* Decomposition_Type */")
         print("enum unicode_decomposition_type {")
         print("\t/* Canonical */")
@@ -1813,6 +2122,12 @@ def write_types_h():
             print("\tUNICODE_DECOMPOSITION_TYPE_%s," % dt_uc)
         print("};")
         print("")
+        print("/* Script */")
+        print("enum unicode_script unicode_script_from_string(const char *str);")
+        print("/* Joining_Type */")
+        print(
+            "enum unicode_joining_type unicode_joining_type_from_string(const char *str);"
+        )
         print("/* Decomposition_Type */")
         print("enum unicode_decomposition_type")
         print("unicode_decomposition_type_from_string(const char *str);")
@@ -1834,6 +2149,50 @@ def write_types_c():
         print_top_message()
         print('#include "lib.h"')
         print('#include "unicode-data-types.h"')
+        print("")
+        print("/* Script */")
+        print("enum unicode_script unicode_script_from_string(const char *str)")
+        print("{")
+        print("\t/* Unknown */")
+        print('\tif (strcasecmp(str, "Unknown") == 0)')
+        print("\t\treturn UNICODE_SCRIPT_UNKNOWN;")
+        print("\t/* Inherited */")
+        print('\telse if (strcasecmp(str, "Inherited") == 0)')
+        print("\t\treturn UNICODE_SCRIPT_INHERITED;")
+        print("\t/* Common */")
+        print('\telse if (strcasecmp(str, "Common") == 0)')
+        print("\t\treturn UNICODE_SCRIPT_COMMON;")
+        for sc in ud_script_names:
+            sc_uc = sc.upper()
+
+            if sc_uc == "UNKNOWN" or sc_uc == "INHERITED" or sc_uc == "COMMON":
+                continue
+            print("\t/* %s */" % sc)
+            print('\telse if (strcasecmp(str, "%s") == 0)' % sc)
+            print("\t\treturn UNICODE_SCRIPT_%s;" % sc_uc)
+        print("")
+        print("\treturn UNICODE_SCRIPT_UNKNOWN;")
+        print("}")
+        print("")
+        print("/* Joining_Type */")
+        print(
+            "enum unicode_joining_type unicode_joining_type_from_string(const char *str)"
+        )
+        print("{")
+        print("\t/* Non_Joining */")
+        print('\tif (strcasecmp(str, "U") == 0)')
+        print("\t\treturn UNICODE_JOINING_TYPE_U;")
+        for jt in ud_joining_type_labels:
+            (sval, lval) = jt
+            sval_uc = sval.upper()
+            if sval_uc == "U":
+                continue
+            print("\t/* %s */" % lval)
+            print('\telse if (strcasecmp(str, "%s") == 0)' % sval)
+            print("\t\treturn UNICODE_JOINING_TYPE_%s;" % sval_uc)
+        print("")
+        print("\treturn UNICODE_JOINING_TYPE_U;")
+        print("}")
         print("")
         print("/* Decomposition_Type */")
         print("enum unicode_decomposition_type")
@@ -1890,6 +2249,7 @@ def main():
     resolve_case_mappings()
     expand_decompositions()
     derive_canonical_compositions()
+    resolve_idna_mappings()
 
     create_cp_index_tables()
 

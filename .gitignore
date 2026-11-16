@@ -40,6 +40,7 @@ auth-token-secret.dat
 /stamp.h
 /stamp-h1
 /stamp-h2
+/build-aux/test-driver
 /build-aux/ylwrap
 /autom4te.cache
 /cc-wrapper.sh
@@ -71,6 +72,7 @@ src/**/fuzz-*
 !src/**/fuzz-*.c
 !src/**/fuzz-*.h
 !src/**/fuzz-*.inc
+!src/**/fuzz-*.dict
 
 doc/man/*.1
 doc/man/*.7

@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "test-lib.h"
 #include "strnum.h"
@@ -11,12 +11,16 @@
 
 #define UCD_CASE_FOLDING_TXT "CaseFolding.txt"
 #define UCD_COMPOSITION_EXCLUSIONS_TXT "CompositionExclusions.txt"
+#define UCD_DERIVED_BIDI_CLASS_TXT "DerivedBidiClass.txt"
+#define UCD_DERIVED_JOINING_TYPE_TXT "DerivedJoiningType.txt"
 #define UCD_DERIVED_NORMALIZATION_PROPS_TXT "DerivedNormalizationProps.txt"
 #define UCD_GRAPHEME_BREAK_PROPERTY_TXT "GraphemeBreakProperty.txt"
 #define UCD_PROP_LIST_TXT "PropList.txt"
+#define UCD_SCRIPTS_TXT "Scripts.txt"
 #define UCD_SPECIAL_CASING_TXT "SpecialCasing.txt"
 #define UCD_UNICODE_DATA_TXT "UnicodeData.txt"
 #define UCD_WORD_BREAK_PROPERTY_TXT "WordBreakProperty.txt"
+#define UCD_IDNA_MAPPING_TABLE_TXT "IdnaMappingTable.txt"
 
 static bool
 parse_prop_file_line(const char *line, const char *file, unsigned int line_num,
@@ -25,11 +29,17 @@ parse_prop_file_line(const char *line, const char *file, unsigned int line_num,
 {
 	unsigned int expected_columns = 1;
 
+	if (*line == '\0')
+		return FALSE;
+
 	if (prop_r != NULL)
 		expected_columns++;
 
 	const char *const *columns = t_strsplit(line, ";");
-	if (str_array_length(columns) < expected_columns) {
+	unsigned int columns_count = str_array_length(columns);
+	if (columns_count == 0)
+		return FALSE;
+	if (columns_count < expected_columns) {
 		test_failed(t_strdup_printf(
 			"Invalid data at %s:%u", file, line_num));
 		return FALSE;
@@ -63,11 +73,16 @@ parse_prop_file_line(const char *line, const char *file, unsigned int line_num,
 	if (prop_r != NULL) {
 		*prop_r = t_str_trim(columns[1], " \t");
 		if (value_r != NULL) {
-			if (columns[2] != NULL)
+			if (columns_count >= 3 && columns[2] != NULL)
 				*value_r = t_str_trim(columns[2], " \t");
 			else
 				*value_r = NULL;
 		}
+	} else if (value_r != NULL) {
+		if (columns_count >= 2 && columns[1] != NULL)
+			*value_r = t_str_trim(columns[1], " \t");
+		else
+			*value_r = NULL;
 	}
 	return !test_has_failed();
 }
@@ -110,13 +125,20 @@ test_case_mapping(uint32_t cp, const char *const *parsed_mapping,
 	}
 }
 
-static void test_case_folding_line(const char *line, unsigned int line_num)
+static void
+test_case_folding_line(const char *line, unsigned int line_num,
+		       const char *comment_data ATTR_UNUSED)
 {
+	if (*line == '\0')
+		return;
+
 	const char *const *columns = t_strsplit(line, ";");
 	size_t num_columns = str_array_length(columns);
 
 	/* <code>; <status>; <mapping>; # <name> */
 
+	if (num_columns == 0)
+		return;
 	if (num_columns < 4) {
 		test_failed(t_strdup_printf(
 			"Invalid data at %s:%u",
@@ -163,7 +185,8 @@ static void test_case_folding_line(const char *line, unsigned int line_num)
 }
 
 static void
-test_composition_exclusions_line(const char *line, unsigned int line_num)
+test_composition_exclusions_line(const char *line, unsigned int line_num,
+				 const char *comment_data ATTR_UNUSED)
 {
 	uint32_t cp_first, cp_last, cp;
 
@@ -180,7 +203,45 @@ test_composition_exclusions_line(const char *line, unsigned int line_num)
 }
 
 static void
-test_derived_normalization_props_line(const char *line, unsigned int line_num)
+test_derived_bidi_class_line(const char *line, unsigned int line_num,
+			     const char *comment_data)
+{
+	uint32_t cp_first, cp_last, cp;
+	const char *value, *comment_line = NULL;
+
+	if (str_begins(comment_data, "@missing: ", &comment_line))
+		line = comment_line;
+
+	if (!parse_prop_file_line(line, UCD_DERIVED_BIDI_CLASS_TXT, line_num,
+				  &cp_first, &cp_last, NULL, &value))
+		return;
+
+	enum unicode_bidi_class bidi_class;
+	if (comment_line == NULL)
+		bidi_class = unicode_bidi_class_from_string(value);
+	else {
+		if (cp_first == 0x0000 && cp_last == 0x10ffff) {
+			/* In this test, we currently assume the specified
+			   @missing ranges are disjoint apart from the first
+			   one. */
+			return;
+		}
+		bidi_class = unicode_bidi_class_from_string_long(value);
+	}
+
+	for (cp = cp_first; cp <= cp_last && !test_has_failed(); cp++) {
+		const struct unicode_code_point_data *cp_data =
+			unicode_code_point_get_data(cp);
+		if (comment_line != NULL &&
+		    cp_data->general_category != UNICODE_GENERAL_CATEGORY_CN)
+			continue;
+		test_assert_idx(cp_data->bidi_class == bidi_class, cp);
+	}
+}
+
+static void
+test_derived_normalization_props_line(const char *line, unsigned int line_num,
+				      const char *comment_data ATTR_UNUSED)
 {
 	uint32_t cp_first, cp_last, cp;
 	const char *prop, *value;
@@ -227,7 +288,30 @@ test_derived_normalization_props_line(const char *line, unsigned int line_num)
 }
 
 static void
-test_grapheme_break_property_line(const char *line, unsigned int line_num)
+test_derived_joining_type_line(const char *line, unsigned int line_num,
+			       const char *comment_data ATTR_UNUSED)
+{
+	uint32_t cp_first, cp_last, cp;
+	const char *value;
+
+	if (!parse_prop_file_line(line, UCD_DERIVED_JOINING_TYPE_TXT, line_num,
+				  &cp_first, &cp_last, NULL, &value))
+		return;
+
+	enum unicode_joining_type jtype =
+		unicode_joining_type_from_string(value);
+
+	for (cp = cp_first; cp <= cp_last && !test_has_failed(); cp++) {
+		const struct unicode_code_point_data *cp_data =
+			unicode_code_point_get_data(cp);
+
+		test_assert_idx(cp_data->joining_type == jtype, cp);
+	}
+}
+
+static void
+test_grapheme_break_property_line(const char *line, unsigned int line_num,
+				  const char *comment_data ATTR_UNUSED)
 {
 	uint32_t cp_first, cp_last, cp;
 	const char *prop;
@@ -269,7 +353,9 @@ test_grapheme_break_property_line(const char *line, unsigned int line_num)
 	}
 }
 
-static void test_prop_list_line(const char *line, unsigned int line_num)
+static void
+test_prop_list_line(const char *line, unsigned int line_num,
+		    const char *comment_data ATTR_UNUSED)
 {
 	uint32_t cp_first, cp_last, cp;
 	const char *prop;
@@ -284,6 +370,8 @@ static void test_prop_list_line(const char *line, unsigned int line_num)
 
 		if (strcmp(prop, "White_Space") == 0)
 			test_assert_idx(cp_data->pb_g_white_space, cp);
+		else if (strcmp(prop, "Join_Control") == 0)
+			test_assert_idx(cp_data->pb_sr_join_control, cp);
 		else if (strcmp(prop, "Pattern_White_Space") == 0)
 			test_assert_idx(cp_data->pb_i_pattern_white_space, cp);
 		else if (strcmp(prop, "Quotation_Mark") == 0)
@@ -297,13 +385,41 @@ static void test_prop_list_line(const char *line, unsigned int line_num)
 	}
 }
 
-static void test_special_casing_line(const char *line, unsigned int line_num)
+static void
+test_scripts_line(const char *line, unsigned int line_num,
+		  const char *comment_data ATTR_UNUSED)
 {
+	uint32_t cp_first, cp_last, cp;
+	const char *value;
+
+	if (!parse_prop_file_line(line, UCD_SCRIPTS_TXT, line_num,
+				  &cp_first, &cp_last, NULL, &value))
+		return;
+
+	enum unicode_script script = unicode_script_from_string(value);
+
+	for (cp = cp_first; cp <= cp_last && !test_has_failed(); cp++) {
+		const struct unicode_code_point_data *cp_data =
+			unicode_code_point_get_data(cp);
+
+		test_assert_idx(cp_data->script == script, cp);
+	}
+}
+
+static void
+test_special_casing_line(const char *line, unsigned int line_num,
+			 const char *comment_data ATTR_UNUSED)
+{
+	if (*line == '\0')
+		return;
+
 	const char *const *columns = t_strsplit(line, ";");
 	size_t num_columns = str_array_length(columns);
 
 	/* <code>; <lower>; <title>; <upper>; (<condition_list>;)? */
 
+	if (num_columns == 0)
+		return;
 	if (num_columns < 4) {
 		test_failed(t_strdup_printf(
 			"Invalid data at %s:%u",
@@ -349,7 +465,9 @@ static void test_special_casing_line(const char *line, unsigned int line_num)
 	test_case_mapping(cp, lower_map, case_map, case_map_len);
 }
 
-static void test_unicode_data_line(const char *line, unsigned int line_num)
+static void
+test_unicode_data_line(const char *line, unsigned int line_num,
+		       const char *comment_data ATTR_UNUSED)
 {
 	static uint32_t cp_first = 0;
 
@@ -542,7 +660,8 @@ static void test_unicode_data_line(const char *line, unsigned int line_num)
 }
 
 static void
-test_word_break_property_line(const char *line, unsigned int line_num)
+test_word_break_property_line(const char *line, unsigned int line_num,
+			      const char *comment_data ATTR_UNUSED)
 {
 	uint32_t cp_first, cp_last, cp;
 	const char *prop;
@@ -593,8 +712,74 @@ test_word_break_property_line(const char *line, unsigned int line_num)
 }
 
 static void
+test_idna_mapping_table_line(const char *line, unsigned int line_num,
+			     const char *comment_data ATTR_UNUSED)
+{
+	if (*line == '\0')
+		return;
+
+	const char *const *columns = t_strsplit(line, ";");
+	size_t num_columns = str_array_length(columns);
+
+	if (num_columns == 0)
+		return;
+	if (num_columns < 2) {
+		test_failed(t_strdup_printf(
+			"Invalid data at %s:%u",
+			UCD_IDNA_MAPPING_TABLE_TXT, line_num));
+		return;
+	}
+
+	uint32_t cp_first, cp_last, cp;
+	const char *status, *value;
+
+	if (!parse_prop_file_line(line, UCD_IDNA_MAPPING_TABLE_TXT, line_num,
+				  &cp_first, &cp_last, &status, &value))
+		return;
+
+	for (cp = cp_first; cp <= cp_last && !test_has_failed(); cp++) {
+		const struct unicode_code_point_data *cp_data =
+			unicode_code_point_get_data(cp);
+
+		switch (cp_data->idna_status) {
+		case UNICODE_IDNA_STATUS_DISALLOWED:
+			test_assert_strcmp_idx(status, "disallowed", line_num);
+			break;
+		case UNICODE_IDNA_STATUS_VALID:
+			test_assert_strcmp_idx(status, "valid", line_num);
+			break;
+		case UNICODE_IDNA_STATUS_IGNORED:
+			test_assert_strcmp_idx(status, "ignored", line_num);
+			break;
+		case UNICODE_IDNA_STATUS_MAPPED:
+			test_assert_strcmp_idx(status, "mapped", line_num);
+			break;
+		case UNICODE_IDNA_STATUS_DEVIATION:
+			test_assert_strcmp_idx(status, "deviation", line_num);
+			break;
+		}
+
+		if (strcmp(status, "mapping") != 0 &&
+		    strcmp(status, "deviation") != 0)
+			continue;
+
+		const char *mapping = t_str_trim(value, " ");
+		const char *const *map = t_strsplit(mapping, " ");
+
+		/* Check data */
+
+		const uint32_t *idna_map =
+			&unicode_idna_mappings[cp_data->idna_mapping_offset];
+		unsigned int idna_map_len = cp_data->idna_mapping_length;
+
+		test_case_mapping(cp, map, idna_map, idna_map_len);
+	}
+}
+
+static void
 test_ucd_file(const char *filename,
-	      void (*test_line)(const char *line, unsigned int line_num))
+	      void (*test_line)(const char *line, unsigned int line_num,
+				const char *comment_data))
 {
 	const char *file_path = t_strconcat(UCD_DIR, "/", filename, NULL);
 	struct istream *input;
@@ -618,14 +803,17 @@ test_ucd_file(const char *filename,
 		line_num++;
 
 		char *comment = strchr(line, '#');
+		const char *comment_data = NULL;
 
-		if (comment != NULL)
+		if (comment != NULL) {
+			comment_data = t_str_trim(comment + 1, " ");
 			*comment = '\0';
-		if (*line == '\0')
+		}
+		if (*line == '\0' && comment_data == NULL)
 			continue;
 
 		T_BEGIN {
-			test_line(line, line_num);
+			test_line(line, line_num, comment_data);
 		} T_END;
 	}
 
@@ -642,13 +830,19 @@ void test_unicode_data(void)
 	test_ucd_file(UCD_CASE_FOLDING_TXT, test_case_folding_line);
 	test_ucd_file(UCD_COMPOSITION_EXCLUSIONS_TXT,
 		      test_composition_exclusions_line);
+	test_ucd_file(UCD_DERIVED_BIDI_CLASS_TXT, test_derived_bidi_class_line);
+	test_ucd_file(UCD_DERIVED_JOINING_TYPE_TXT,
+		      test_derived_joining_type_line);
 	test_ucd_file(UCD_DERIVED_NORMALIZATION_PROPS_TXT,
 		      test_derived_normalization_props_line);
 	test_ucd_file(UCD_GRAPHEME_BREAK_PROPERTY_TXT,
 		      test_grapheme_break_property_line);
 	test_ucd_file(UCD_PROP_LIST_TXT, test_prop_list_line);
+	test_ucd_file(UCD_SCRIPTS_TXT, test_scripts_line);
 	test_ucd_file(UCD_SPECIAL_CASING_TXT, test_special_casing_line);
 	test_ucd_file(UCD_UNICODE_DATA_TXT, test_unicode_data_line);
 	test_ucd_file(UCD_WORD_BREAK_PROPERTY_TXT,
 		      test_word_break_property_line);
+	test_ucd_file(UCD_IDNA_MAPPING_TABLE_TXT,
+		      test_idna_mapping_table_line);
 }

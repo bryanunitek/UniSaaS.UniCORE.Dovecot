@@ -5,7 +5,7 @@ struct module;
 
 #include "net.h"
 #include "login-proxy.h"
-#include "sasl-server.h"
+#include "sasl-proxy.h"
 #include "login-client.h"
 
 #define LOGIN_MAX_SESSION_ID_LEN 64
@@ -64,6 +64,7 @@ enum client_auth_fail_code {
 	CLIENT_AUTH_FAIL_CODE_MECH_INVALID,
 	CLIENT_AUTH_FAIL_CODE_MECH_SSL_REQUIRED,
 	CLIENT_AUTH_FAIL_CODE_ANONYMOUS_DENIED,
+	CLIENT_AUTH_FAIL_CODE_INVALID_CREDENTIALS,
 
 	CLIENT_AUTH_FAIL_CODE_COUNT
 };
@@ -122,6 +123,7 @@ struct client_auth_reply {
 struct client_vfuncs {
 	struct client *(*alloc)(pool_t pool);
 	int (*create)(struct client *client);
+	void (*disconnect)(struct client *client, const char *reason);
 	void (*destroy)(struct client *client);
 	int (*reload_config)(struct client *client, const char **error_r);
 	void (*notify_auth_ready)(struct client *client);
@@ -229,7 +231,7 @@ struct client {
 	unsigned int proxy_ttl;
 
 	char *auth_mech_name;
-	enum sasl_server_auth_flags auth_flags;
+	enum sasl_proxy_auth_flags auth_flags;
 	/* Auth request set while the client is authenticating.
 	   During this time authenticating=TRUE also. */
 	struct auth_client_request *auth_request;
@@ -248,7 +250,7 @@ struct client {
 	   sending client fd to mail process. authenticating is always TRUE
 	   while this is non-zero. */
 	unsigned int master_tag;
-	sasl_server_callback_t *sasl_callback;
+	sasl_proxy_callback_t *sasl_callback;
 
 	unsigned int bad_counter;
 	unsigned int auth_attempts, auth_successes;
@@ -266,6 +268,9 @@ struct client {
 	   as in global_alt_usernames. If some field doesn't exist, it's "".
 	   Can also be NULL if there are no user_* fields. */
 	const char **alt_usernames;
+
+	/* Last host we tried to connect to */
+	char *proxy_last_host;
 
 	bool create_finished:1;
 	bool disconnected:1;

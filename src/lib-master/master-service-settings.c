@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -16,6 +16,7 @@
 #include "env-util.h"
 #include "execv-const.h"
 #include "version.h"
+#include "storage-version.h"
 #include "settings.h"
 #include "stats-client.h"
 #include "master-service-private.h"
@@ -156,6 +157,45 @@ master_service_set_process_shutdown_filter_wrapper(struct event_filter *filter)
 	master_service_set_process_shutdown_filter(master_service, filter);
 }
 
+/* List of dovecot_config_versions accepted at parse / startup time.
+   dovecot_storage_version accepts these as well, plus an extra legacy set
+   defined in storage_version_check(). */
+static const char *const dovecot_config_supported_versions[] = {
+#ifdef DOVECOT_PRO_EDITION
+	"3.1.0",
+	"3.1.1",
+	"3.1.2",
+	"3.1.3",
+	"3.1.4",
+	"3.1.5",
+	"3.1.6",
+	"3.2.0",
+#else
+	"2.4.0",
+	"2.4.1",
+	"2.4.2",
+	"2.4.3",
+	"2.4.4",
+#endif
+	NULL
+};
+
+bool dovecot_config_version_find(const char *version, const char **error_r)
+{
+	/* FIXME: implement full version checking later */
+	if (!str_array_find(dovecot_config_supported_versions, version) &&
+	    strcmp(DOVECOT_CONFIG_VERSION, version) != 0) {
+		*error_r = t_strdup_printf(
+			"Currently supported versions are: %s%s",
+			t_strarray_join(dovecot_config_supported_versions, " "),
+			str_array_find(dovecot_config_supported_versions,
+				       DOVECOT_CONFIG_VERSION) ? "" :
+			t_strdup_printf(" %s", DOVECOT_CONFIG_VERSION));
+		return FALSE;
+	}
+	return TRUE;
+}
+
 static bool storage_version_check(const char *version, const char **error_r)
 {
 #define STORAGE_MIN_VERSION "2.3.0"
@@ -175,14 +215,26 @@ static bool storage_version_check(const char *version, const char **error_r)
 			STORAGE_MIN_VERSION);
 		return FALSE;
 	}
-	if (version_is_valid(DOVECOT_VERSION) &&
-	    version_cmp(version, DOVECOT_VERSION) > 0) {
-		*error_r = t_strdup_printf(
-			"dovecot_storage_version is too new - "
-			"current version is %s", DOVECOT_VERSION);
-		return FALSE;
+	/* Legacy: any version <= 2.3.22.1 is accepted. */
+	if (version_cmp(version, "2.3.22.1") <= 0)
+		return TRUE;
+#ifdef DOVECOT_PRO_EDITION
+	if (version_cmp(version, "3.0.0") >= 0 &&
+	    version_cmp(version, "3.0.5") <= 0)
+		return TRUE;
+#endif
+	const char *config_err;
+	if (dovecot_config_version_find(version, &config_err))
+		return TRUE;
+
+	if (strcmp(version, storage_version_default()) == 0) {
+		/* git build */
+		return TRUE;
 	}
-	return TRUE;
+	*error_r = t_strdup_printf(
+		"Unsupported dovecot_storage_version %s. %s",
+		version, config_err);
+	return FALSE;
 }
 
 static bool
@@ -535,15 +587,10 @@ master_service_settings_read_int(struct master_service *service,
 	} else if (!settings_has_mmap(service->settings_root)) {
 		/* Use default settings. Set dovecot_storage_version to the
 		   latest version, so it won't cause a failure. Use userdb
-		   type, so it can still be overridden with -o parameter.
-
-		   When building from git we don't know the latest version, so
-		   just use 9999. The version validity checks are disabled for
-		   git builds, so this should work. */
-		const char *version = version_is_valid(DOVECOT_VERSION) ?
-			DOVECOT_VERSION : "9999";
+		   type, so it can still be overridden with -o parameter. */
 		settings_root_override(service->settings_root,
-				       "dovecot_storage_version", version,
+				       "dovecot_storage_version",
+				       storage_version_default(),
 				       SETTINGS_OVERRIDE_TYPE_USERDB);
 	}
 	if (!settings_has_mmap(service->settings_root)) {

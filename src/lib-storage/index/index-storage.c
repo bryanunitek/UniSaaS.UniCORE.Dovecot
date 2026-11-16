@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -451,8 +451,7 @@ void index_storage_mailbox_close(struct mailbox *box)
 	mailbox_watch_remove_all(box);
 	i_stream_unref(&box->input);
 
-	if (box->view_pvt != NULL)
-		mail_index_view_close(&box->view_pvt);
+	mail_index_view_close(&box->view_pvt);
 	if (box->index_pvt != NULL)
 		mail_index_close(box->index_pvt);
 	if (box->view != NULL) {

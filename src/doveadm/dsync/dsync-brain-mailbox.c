@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -204,8 +204,13 @@ dsync_brain_sync_mailbox_init_remote(struct dsync_brain *brain,
 		import_flags |= DSYNC_MAILBOX_IMPORT_FLAG_WANT_MAIL_REQUESTS;
 	if (brain->master_brain)
 		import_flags |= DSYNC_MAILBOX_IMPORT_FLAG_MASTER_BRAIN;
-	if (brain->backup_recv && !brain->no_backup_overwrite)
+	if (brain->backup_recv && !brain->no_backup_overwrite) {
 		import_flags |= DSYNC_MAILBOX_IMPORT_FLAG_REVERT_LOCAL_CHANGES;
+		if (brain->remote_backup_full_attrs) {
+			import_flags |=
+				DSYNC_MAILBOX_IMPORT_FLAG_DELETE_UNKNOWN_ATTRS;
+		}
+	}
 	if (brain->local_dsync_box.have_save_guids &&
 	    (remote_dsync_box->have_save_guids ||
 	     (brain->backup_recv && remote_dsync_box->have_guids)))
@@ -302,7 +307,7 @@ int dsync_brain_sync_mailbox_open(struct dsync_brain *brain,
 	}
 
 	if (last_common_uid != 0) {
-		/* if last_common_* is higher than our current ones it means
+		/* if last_common_* is greater than our current ones it means
 		   that the incremental sync state is stale and we need to do
 		   a full resync */
 		if (status.uidnext < last_common_uid) {
@@ -343,6 +348,11 @@ int dsync_brain_sync_mailbox_open(struct dsync_brain *brain,
 		exporter_flags |= DSYNC_MAILBOX_EXPORTER_FLAG_TIMESTAMPS;
 	if (brain->sync_max_size > 0)
 		exporter_flags |= DSYNC_MAILBOX_EXPORTER_FLAG_VSIZES;
+	if (brain->backup_send && !brain->no_backup_overwrite) {
+		/* The destination reverts its local changes, so it needs to
+		   see also the attributes that we haven't changed. */
+		exporter_flags |= DSYNC_MAILBOX_EXPORTER_FLAG_ALL_ATTRS;
+	}
 	if (remote_dsync_box->messages_count == 0 ||
 	    brain->no_header_hashes) {
 		/* remote mailbox is empty - we don't really need to export

@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "imap-common.h"
 #include "ioloop.h"
@@ -12,6 +12,7 @@
 #include "istream-concat.h"
 #include "ostream.h"
 #include "ostream-multiplex.h"
+#include "ostream-zlib.h"
 #include "time-util.h"
 #include "settings.h"
 #include "master-service.h"
@@ -697,6 +698,45 @@ void client_send_tagline(struct client_command_context *cmd, const char *data)
 	cmd->client->v.send_tagline(cmd, data);
 }
 
+void client_create_side_channel_output(struct client *client)
+{
+	i_assert(client->multiplex_output != NULL);
+	i_assert(client->side_channel_output == NULL);
+	client->side_channel_output =
+		o_stream_multiplex_add_channel(client->multiplex_output, 1);
+	o_stream_set_no_error_handling(client->side_channel_output, TRUE);
+}
+
+static bool
+client_tagline_has_resp_code(const char *data)
+{
+	const char *space = strchr(data, ' ');
+	return space != NULL && space[1] == '[';
+}
+
+static const char *
+client_tagline_insert_throttled(const char *data)
+{
+	const char *space = strchr(data, ' ');
+	if (space == NULL)
+		return t_strconcat(data, " ["IMAP_RESP_CODE_THROTTLED"]", NULL);
+	return t_strdup_printf("%.*s ["IMAP_RESP_CODE_THROTTLED"]%s",
+			       (int)(space - data), data, space);
+}
+
+static intmax_t
+client_tagline_throttled_msecs(struct client_command_context *cmd)
+{
+	if (cmd->global_event == NULL)
+		return 0;
+	const struct event_field *f = event_find_field_nonrecursive(
+		cmd->global_event, IMAP_EVENT_FIELD_THROTTLED_ANY);
+	if (f == NULL || f->value_type != EVENT_FIELD_VALUE_TYPE_INTMAX ||
+	    f->value.intmax <= 0)
+		return 0;
+	return f->value.intmax;
+}
+
 static void
 client_default_send_tagline(struct client_command_context *cmd, const char *data)
 {
@@ -708,20 +748,47 @@ client_default_send_tagline(struct client_command_context *cmd, const char *data
 
 	i_assert(!cmd->tagline_sent);
 	cmd->tagline_sent = TRUE;
-	cmd->tagline_reply = p_strdup(cmd->pool, data);
 
 	if (tag == NULL || *tag == '\0')
 		tag = "*";
 
 	T_BEGIN {
+		intmax_t throttled_msecs =
+			client_tagline_throttled_msecs(cmd);
+		if (throttled_msecs > 0 &&
+		    !client_tagline_has_resp_code(data))
+			data = client_tagline_insert_throttled(data);
+		cmd->tagline_reply = p_strdup(cmd->pool, data);
+
 		string_t *str = t_str_new(256);
 		str_printfa(str, "%s %s", tag, data);
+		if (throttled_msecs > 0) {
+			str_printfa(str, " (throttled %jd.%03jd secs)",
+				    throttled_msecs / 1000,
+				    throttled_msecs % 1000);
+		}
 		client_cmd_append_timing_stats(cmd, str);
 		str_append(str, "\r\n");
 		o_stream_nsend(client->output, str_data(str), str_len(str));
 	} T_END;
 
 	client->last_output = ioloop_time;
+
+	/* Reset the DEFLATE compression dictionary after every tagged reply so
+	   that cross-command compression correlation attacks (CRIME-style) are
+	   not possible.  For proxy-mode compression the reset is forwarded to
+	   the imap-login process via the side channel; for direct compression
+	   it is applied to the local ostream immediately. */
+	if (client->compress_handler != NULL) {
+		if (client->multiplex_output != NULL &&
+		    client->set->imap_compress_on_proxy) {
+			i_assert(client->side_channel_output != NULL);
+			o_stream_nsend_str(client->side_channel_output,
+					   "dict_reset\n");
+		} else {
+			o_stream_deflate_reset_dict(client->output);
+		}
+	}
 }
 
 static int
@@ -1234,7 +1301,7 @@ static bool client_skip_line(struct client *client)
 static void client_idle_output_timeout(struct client *client)
 {
 	client_destroy(client, t_strdup_printf(
-		"Client has not read server output for for %"PRIdTIME_T" secs",
+		"Client has not read server output for %"PRIdTIME_T" secs",
 		ioloop_time - client->last_output));
 }
 

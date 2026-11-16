@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -700,11 +700,16 @@ void index_mail_cache_pop3_data(struct mail *_mail,
 				     &order, sizeof(order));
 }
 
+struct parse_bodystructure_ctx {
+	pool_t pool;
+	struct message_part_data_limits *limits;
+};
+
 static void parse_bodystructure_part_header(struct message_part *part,
 					    struct message_header_line *hdr,
-					    pool_t pool)
+					    struct parse_bodystructure_ctx *ctx)
 {
-	message_part_data_parse_from_header(pool, part, hdr);
+	message_part_data_parse_from_header(ctx->pool, part, ctx->limits, hdr);
 }
 
 static bool want_plain_bodystructure_cached(struct index_mail *mail)
@@ -1189,17 +1194,33 @@ index_mail_parse_body_finish(struct index_mail *mail,
 			    i_stream_have_bytes_left(parser_input))
 				i_unreached();
 		}
-		/* EPIPE = input already closed. allow the caller to
-		   decide if that is an error or not. (for example we
-		   could be coming here from IMAP APPEND when IMAP
-		   client has closed the connection too early. we
-		   don't want to log an error in that case.)
-		   Note that EPIPE may also come from istream-mail which
-		   detects a corrupted message size. Either way, the
-		   body wasn't successfully parsed. */
+		/* Log the failure, unless the errno tells that nothing
+		   useful would be logged. The body wasn't successfully
+		   parsed in any case, so ret=-1 regardless.
+
+		   EPIPE never means a failed syscall here: it's set for
+		   any stream that was closed without an error (see
+		   i_stream_close()), and by istream-mail when the message
+		   is smaller than its cached size - which is already
+		   reported via mail_set_cache_corrupted(). The stream may
+		   for example have been closed by IMAP APPEND when the
+		   client disconnected in the middle of sending the mail.
+		   Let the caller decide whether that is an error.
+
+		   ECONNRESET/ECONNABORTED mean that the connection was
+		   reset instead of being closed cleanly. Ignore it only
+		   while saving has already failed, because then the stream
+		   is the client's (e.g. IMAP APPEND, LMTP) and the caller
+		   logs the disconnection. When reading a mail the stream
+		   comes from the storage instead (e.g. obox over HTTP),
+		   where a reset connection is a real error. */
 		if (parser_input->stream_errno == 0)
 			;
 		else if (parser_input->stream_errno == EPIPE)
+			ret = -1;
+		else if (!success &&
+			 (parser_input->stream_errno == ECONNRESET ||
+			  parser_input->stream_errno == ECONNABORTED))
 			ret = -1;
 		else {
 			index_mail_stream_log_failure_for(mail, parser_input);
@@ -1328,9 +1349,13 @@ static int index_mail_parse_body(struct index_mail *mail,
 		/* bodystructure header is parsed, we want the body's mime
 		   headers too */
 		i_assert(data->parsed_bodystructure_header);
+		struct parse_bodystructure_ctx bsctx = {
+			.pool = mail->mail.data_pool,
+			.limits = &mail->data.part_data_limits,
+		};
 		message_parser_parse_body(data->parser_ctx,
 					  parse_bodystructure_part_header,
-					  mail->mail.data_pool);
+					  &bsctx);
 	} else {
 		message_parser_parse_body(data->parser_ctx,
 			*null_message_part_header_callback, NULL);
@@ -1874,6 +1899,8 @@ static void index_mail_init_data(struct index_mail *mail)
 	data->received_date = (time_t)-1;
 	data->sent_date.time = (uint32_t)-1;
 	data->dont_cache_field_idx = UINT_MAX;
+	data->part_data_limits = (struct message_part_data_limits)
+		MESSAGE_PART_DATA_LIMITS_INIT;
 
 	data->wanted_fields = mail->mail.wanted_fields;
 	if (mail->mail.wanted_headers != NULL) {
@@ -2336,7 +2363,9 @@ void index_mail_cache_parse_continue(struct mail *_mail)
 				mail->data.header_parsed = TRUE;
 		} else {
 			message_part_data_parse_from_header(mail->mail.data_pool,
-							block.part, block.hdr);
+							block.part,
+							&mail->data.part_data_limits,
+							block.hdr);
 		}
 	}
 }

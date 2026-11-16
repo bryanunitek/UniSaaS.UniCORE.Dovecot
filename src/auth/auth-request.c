@@ -1,4 +1,4 @@
-/* Copyright (c) 2002-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "auth-common.h"
 #include "ioloop.h"
@@ -395,6 +395,8 @@ bool auth_request_import_master(struct auth_request *request,
 			request->session_pid = pid;
 	} else if (strcmp(key, "request_auth_token") == 0)
 		request->request_auth_token = TRUE;
+	else if (strcmp(key, "session_pid_trusted") == 0)
+		request->session_pid_trusted = TRUE;
 	else
 		return FALSE;
 	return TRUE;
@@ -776,7 +778,7 @@ static void auth_request_passdb_internal_failure(struct auth_request *request)
 	request->passdb_result = PASSDB_RESULT_INTERNAL_FAILURE;
 	if (request->wanted_credentials_scheme != NULL) {
 		request->private_callback.lookup_credentials(
-			request->passdb_result, &uchar_nul, 0, request);
+			request->passdb_result, &uchar_nul, 0, NULL, request);
 	} else {
 		request->private_callback.verify_plain(request->passdb_result,
 						       request);
@@ -1095,7 +1097,13 @@ auth_request_verify_plain_callback_finish(enum passdb_result result,
 	}
 }
 
-void auth_request_verify_plain_callback(enum passdb_result result,
+static void
+auth_request_verify_plain_internal_failure(struct auth_request *request)
+{
+	auth_request_verify_plain_callback_finish(PASSDB_RESULT_INTERNAL_FAILURE, request);
+}
+
+void auth_request_verify_plain_passdb_callback(enum passdb_result result,
 					struct auth_request *request)
 {
 	struct auth_passdb *passdb = request->passdb;
@@ -1108,24 +1116,17 @@ void auth_request_verify_plain_callback(enum passdb_result result,
 	    auth_fields_exists(request->fields.extra_fields, "noauthenticate"))
 		result = PASSDB_RESULT_NEXT;
 
-	if (result != PASSDB_RESULT_INTERNAL_FAILURE)
+	if (result != PASSDB_RESULT_INTERNAL_FAILURE) {
 		auth_request_save_cache(request, result);
-	else {
-		/* lookup failed. if we're looking here only because the
-		   request was expired in cache, fallback to using cached
-		   expired record. */
-		const char *cache_key = passdb->cache_key;
-
-		if (passdb_cache_verify_plain(request, cache_key,
-					      request->mech_password,
-					      &result, TRUE)) {
-			e_info(authdb_event(request),
-			       "Falling back to expired data from cache");
-			return;
-		}
+		auth_request_verify_plain_callback_finish(result, request);
+		return;
 	}
 
-	auth_request_verify_plain_callback_finish(result, request);
+	/* lookup failed. if we're looking here only because the request was
+	   expired in cache, fallback to using cached expired record. */
+	passdb_cache_verify_plain(request, passdb->cache_key,
+				  request->mech_password, TRUE,
+				  auth_request_verify_plain_internal_failure);
 }
 
 static bool password_has_illegal_chars(const char *password)
@@ -1239,11 +1240,35 @@ void auth_request_verify_plain(struct auth_request *request,
 	}
 }
 
+static void
+auth_request_verify_plain_passdb(struct auth_request *request)
+{
+	struct auth_passdb *passdb = request->passdb;
+
+	auth_request_set_state(request, AUTH_REQUEST_STATE_PASSDB);
+	/* In case this request had already done a credentials lookup (is it
+	   even possible?), make sure wanted_credentials_scheme is cleared
+	   so passdbs don't think we're doing a credentials lookup. */
+	request->wanted_credentials_scheme = NULL;
+
+	if (passdb->passdb->iface.verify_plain == NULL) {
+		/* we're deinitializing and just want to get rid of this
+		   request */
+		auth_request_verify_plain_passdb_callback(
+			PASSDB_RESULT_INTERNAL_FAILURE, request);
+	} else if (passdb->passdb->blocking) {
+		passdb_blocking_verify_plain(request);
+	} else {
+		passdb->passdb->iface.verify_plain(
+			request, request->mech_password,
+			auth_request_verify_plain_passdb_callback);
+	}
+}
+
 void auth_request_default_verify_plain_continue(
 	struct auth_request *request, verify_plain_callback_t *callback)
 {
 	struct auth_passdb *passdb;
-	enum passdb_result result;
 	const char *cache_key;
 	const char *password = request->mech_password;
 
@@ -1278,34 +1303,14 @@ void auth_request_default_verify_plain_continue(
 	request->private_callback.verify_plain = callback;
 
 	cache_key = passdb_cache == NULL ? NULL : passdb->cache_key;
-	if (passdb_cache_verify_plain(request, cache_key, password,
-				      &result, FALSE)) {
-		return;
-	}
-
-	auth_request_set_state(request, AUTH_REQUEST_STATE_PASSDB);
-	/* In case this request had already done a credentials lookup (is it
-	   even possible?), make sure wanted_credentials_scheme is cleared
-	   so passdbs don't think we're doing a credentials lookup. */
-	request->wanted_credentials_scheme = NULL;
-
-	if (passdb->passdb->iface.verify_plain == NULL) {
-		/* we're deinitializing and just want to get rid of this
-		   request */
-		auth_request_verify_plain_callback(
-			PASSDB_RESULT_INTERNAL_FAILURE, request);
-	} else if (passdb->passdb->blocking) {
-		passdb_blocking_verify_plain(request);
-	} else {
-		passdb->passdb->iface.verify_plain(
-			request, password, auth_request_verify_plain_callback);
-	}
+	passdb_cache_verify_plain(request, cache_key, password, FALSE,
+				  auth_request_verify_plain_passdb);
 }
 
 static void
 auth_request_lookup_credentials_finish(enum passdb_result result,
 				       const unsigned char *credentials,
-				       size_t size,
+				       size_t size, const char *scheme,
 				       struct auth_request *request)
 {
 	int ret;
@@ -1345,13 +1350,14 @@ auth_request_lookup_credentials_finish(enum passdb_result result,
 		}
 		request->passdb_result = result;
 		request->private_callback.
-			lookup_credentials(result, credentials, size, request);
+			lookup_credentials(result, credentials, size, scheme,
+					   request);
 	}
 }
 
 void auth_request_lookup_credentials_callback(enum passdb_result result,
 					      const unsigned char *credentials,
-					      size_t size,
+					      size_t size, const char *scheme,
 					      struct auth_request *request)
 {
 	struct auth_passdb *passdb = request->passdb;
@@ -1387,7 +1393,7 @@ void auth_request_lookup_credentials_callback(enum passdb_result result,
 	}
 
 	auth_request_lookup_credentials_finish(result, credentials, size,
-					       request);
+					       scheme, request);
 }
 
 void auth_request_lookup_credentials(struct auth_request *request,
@@ -1427,7 +1433,7 @@ auth_request_lookup_credentials_policy_continue(
 
 	i_assert(request->state == AUTH_REQUEST_STATE_MECH_CONTINUE);
 	if (auth_request_is_disabled_master_user(request)) {
-		callback(PASSDB_RESULT_USER_UNKNOWN, NULL, 0, request);
+		callback(PASSDB_RESULT_USER_UNKNOWN, NULL, 0, NULL, request);
 		return;
 	}
 	passdb = request->passdb;
@@ -1441,11 +1447,11 @@ auth_request_lookup_credentials_policy_continue(
 			   credentials, so we can just continue as success. */
 			result = PASSDB_RESULT_OK;
 			request->passdb_result = result;
-			callback(result, NULL, 0, request);
+			callback(result, NULL, 0, NULL, request);
 			return;
 		}
 		e_error(request->event, "All password databases were skipped");
-		callback(PASSDB_RESULT_INTERNAL_FAILURE, NULL, 0, request);
+		callback(PASSDB_RESULT_INTERNAL_FAILURE, NULL, 0, NULL, request);
 		return;
 	}
 
@@ -1476,42 +1482,13 @@ auth_request_lookup_credentials_policy_continue(
 			"passdb doesn't support credential lookups");
 		auth_request_lookup_credentials_callback(
 					PASSDB_RESULT_SCHEME_NOT_AVAILABLE,
-					uchar_empty_ptr, 0, request);
+					uchar_empty_ptr, 0, NULL, request);
 	} else if (passdb->passdb->blocking) {
 		passdb_blocking_lookup_credentials(request);
 	} else {
 		passdb->passdb->iface.lookup_credentials(request,
 			auth_request_lookup_credentials_callback);
 	}
-}
-
-void auth_request_set_credentials(struct auth_request *request,
-				  const char *scheme, const char *data,
-				  set_credentials_callback_t *callback)
-{
-	struct auth_passdb *passdb = request->passdb;
-	const char *cache_key, *new_credentials;
-
-	auth_request_passdb_event_begin(request);
-
-	cache_key = passdb_cache == NULL ? NULL : passdb->cache_key;
-	if (cache_key != NULL)
-		auth_cache_remove(passdb_cache, request, cache_key);
-
-	request->private_callback.set_credentials = callback;
-
-	new_credentials = t_strdup_printf("{%s}%s", scheme, data);
-	if (passdb->passdb->blocking)
-		passdb_blocking_set_credentials(request, new_credentials);
-	else if (passdb->passdb->iface.set_credentials != NULL) {
-		passdb->passdb->iface.set_credentials(request, new_credentials,
-						      callback);
-	} else {
-		/* this passdb doesn't support credentials update */
-		callback(FALSE, request);
-	}
-
-	auth_request_passdb_event_end(request);
 }
 
 static void

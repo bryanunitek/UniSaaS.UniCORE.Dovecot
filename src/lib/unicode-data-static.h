@@ -122,9 +122,89 @@ enum unicode_indic_conjunct_break {
 	UNICODE_INDIC_CONJUNCT_BREAK_EXTEND,
 };
 
+enum unicode_bidi_class {
+	/* Strong Types */
+
+	/* Left_To_Right */
+	UNICODE_BIDI_CLASS_L = 0,
+	/* Right_To_Left */
+	UNICODE_BIDI_CLASS_R,
+	/* Arabic_Letter */
+	UNICODE_BIDI_CLASS_AL,
+
+	/* Weak Types */
+
+	/* European_Number */
+	UNICODE_BIDI_CLASS_EN,
+	/* European_Separator */
+	UNICODE_BIDI_CLASS_ES,
+	/* European_Terminator */
+	UNICODE_BIDI_CLASS_ET,
+	/* Arabic_Number */
+	UNICODE_BIDI_CLASS_AN,
+	/* Common_Separator */
+	UNICODE_BIDI_CLASS_CS,
+	/* Nonspacing_Mark */
+	UNICODE_BIDI_CLASS_NSM,
+	/* Boundary_Neutral */
+	UNICODE_BIDI_CLASS_BN,
+
+	/* Neutral Types */
+
+	/* Paragraph_Separator */
+	UNICODE_BIDI_CLASS_B,
+	/* Segment_Separator */
+	UNICODE_BIDI_CLASS_S,
+	/* White_Space */
+	UNICODE_BIDI_CLASS_WS,
+	/* Other_Neutral */
+	UNICODE_BIDI_CLASS_ON,
+
+	/* Explicit Formatting Types */
+
+	/* Left_To_Right_Embedding */
+	UNICODE_BIDI_CLASS_LRE,
+	/* Left_To_Right_Override */
+	UNICODE_BIDI_CLASS_LRO,
+	/* Right_To_Left_Embedding */
+	UNICODE_BIDI_CLASS_RLE,
+	/* Right_To_Left_Override */
+	UNICODE_BIDI_CLASS_RLO,
+	/* Pop_Directional_Format */
+	UNICODE_BIDI_CLASS_PDF,
+	/* Left_To_Right_Isolate */
+	UNICODE_BIDI_CLASS_LRI,
+	/* Right_To_Left_Isolate */
+	UNICODE_BIDI_CLASS_RLI,
+	/* First_Strong_Isolate */
+	UNICODE_BIDI_CLASS_FSI,
+	/* Pop_Directional_Isolate */
+	UNICODE_BIDI_CLASS_PDI,
+};
+
+/* For each code point in Unicode, the IDNA Mapping Table provides one of the
+   following Status values: */
+enum unicode_idna_status {
+	/* disallowed: the code point is not allowed. */
+	UNICODE_IDNA_STATUS_DISALLOWED = 0,
+	/* valid: the code point is valid, and not modified. */
+	UNICODE_IDNA_STATUS_VALID,
+	/* ignored: the code point is removed:
+	 * this is equivalent to mapping the code point to an empty string. */
+	UNICODE_IDNA_STATUS_IGNORED,
+	/* mapped: the code point is replaced in the string by the value for the
+	   mapping. */
+	UNICODE_IDNA_STATUS_MAPPED,
+	/* deviation: the code point is either mapped or valid, depending on
+	   whether the processing is transitional or not. */
+	UNICODE_IDNA_STATUS_DEVIATION,
+};
+
 struct unicode_code_point_data {
-	uint8_t general_category; // Not yet used
+	uint8_t general_category;
+	uint8_t script;
 	uint8_t canonical_combining_class;
+	uint8_t joining_type;
 	uint8_t nf_quick_check;
 
 	uint8_t decomposition_type; // Not yet used
@@ -138,6 +218,11 @@ struct unicode_code_point_data {
 	uint8_t lowercase_mapping_length;
 	uint8_t casefold_mapping_length;
 
+	uint8_t bidi_class;
+
+	uint8_t idna_status:3;
+	uint8_t idna_mapping_length:5;
+
 	uint16_t decomposition_first_offset;
 	uint16_t decomposition_full_offset;
 	uint16_t decomposition_full_k_offset;
@@ -146,6 +231,8 @@ struct unicode_code_point_data {
 	uint16_t uppercase_mapping_offset;
 	uint16_t lowercase_mapping_offset;
 	uint16_t casefold_mapping_offset;
+
+	uint16_t idna_mapping_offset;
 
 	uint32_t simple_titlecase_mapping;
 
@@ -158,6 +245,9 @@ struct unicode_code_point_data {
 
 	/* Emoji */
 	bool pb_e_extended_pictographic:1;
+
+	/* Shaping and Rendering */
+	bool pb_sr_join_control:1;
 
 	/* Identifiers */
 	bool pb_i_pattern_white_space:1;

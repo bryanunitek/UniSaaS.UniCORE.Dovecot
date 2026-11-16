@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "common.h"
 #include "ioloop.h"
@@ -18,7 +18,11 @@
 #include <unistd.h>
 #include <signal.h>
 
-#define SERVICE_DIE_TIMEOUT_MSECS (1000*6)
+/* How long to wait after config reload before killing processes that aren't
+   dying by themself. Keep this higher than
+   MASTER_SERVICE_DEFAULT_DIE_TIMEOUT_MSECS, and higher than any die timeout
+   set with master_service_set_die_timeout_msecs(). */
+#define SERVICE_DIE_TIMEOUT_MSECS (1000*35)
 #define SERVICE_LOGIN_NOTIFY_MIN_INTERVAL_SECS 2
 
 HASH_TABLE_TYPE(pid_process) service_pids;

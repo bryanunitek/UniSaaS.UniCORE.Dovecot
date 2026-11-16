@@ -20,7 +20,9 @@ UCD_ABS_DIR = $(abs_srcdir)/ucd
 UCD_FILES = \
 	$(UCD_DIR)/CaseFolding.txt \
 	$(UCD_DIR)/CompositionExclusions.txt \
+	$(UCD_DIR)/DerivedBidiClass.txt \
 	$(UCD_DIR)/DerivedCoreProperties.txt \
+	$(UCD_DIR)/DerivedJoiningType.txt \
 	$(UCD_DIR)/DerivedNormalizationProps.txt \
 	$(UCD_DIR)/emoji-data.txt \
 	$(UCD_DIR)/GraphemeBreakProperty.txt \
@@ -28,9 +30,12 @@ UCD_FILES = \
 	$(UCD_DIR)/NormalizationTest.txt \
 	$(UCD_DIR)/PropertyValueAliases.txt \
 	$(UCD_DIR)/PropList.txt \
+	$(UCD_DIR)/Scripts.txt \
 	$(UCD_DIR)/SpecialCasing.txt \
 	$(UCD_DIR)/UnicodeData.txt \
-	$(UCD_DIR)/WordBreakProperty.txt
+	$(UCD_DIR)/WordBreakProperty.txt \
+	$(UCD_DIR)/IdnaMappingTable.txt \
+	$(UCD_DIR)/IdnaTestV2.txt
 
 EXTRA_DIST = \
 	unicode-data-tables.c \
@@ -65,8 +70,12 @@ $(UCD_DIR)/CaseFolding.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/CaseFolding.txt
 $(UCD_DIR)/CompositionExclusions.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/CompositionExclusions.txt
+$(UCD_DIR)/DerivedBidiClass.txt:
+	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/DerivedBidiClass.txt
 $(UCD_DIR)/DerivedCoreProperties.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/DerivedCoreProperties.txt
+$(UCD_DIR)/DerivedJoiningType.txt:
+	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/DerivedJoiningType.txt
 $(UCD_DIR)/DerivedNormalizationProps.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/DerivedNormalizationProps.txt
 $(UCD_DIR)/emoji-data.txt:
@@ -81,12 +90,18 @@ $(UCD_DIR)/PropertyValueAliases.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/PropertyValueAliases.txt
 $(UCD_DIR)/PropList.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/PropList.txt
+$(UCD_DIR)/Scripts.txt:
+	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/Scripts.txt
 $(UCD_DIR)/SpecialCasing.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/SpecialCasing.txt
 $(UCD_DIR)/UnicodeData.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/UnicodeData.txt
 $(UCD_DIR)/WordBreakProperty.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/WordBreakProperty.txt
+$(UCD_DIR)/IdnaMappingTable.txt:
+	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/IdnaMappingTable.txt
+$(UCD_DIR)/IdnaTestV2.txt:
+	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ $(UCD_URL)/IdnaTestV2.txt
 
 $(srcdir)/unicode-data-tables.c $(srcdir)/unicode-data-tables.h \
 	$(srcdir)/unicode-data-types.c $(srcdir)/unicode-data-types.h &: \
@@ -102,6 +117,7 @@ liblib_la_SOURCES = \
 	base32.c \
 	base64.c \
 	bits.c \
+	bitmap.c \
 	bsearch-insert-pos.c \
 	buffer.c \
 	buffer-istream.c \
@@ -140,6 +156,8 @@ liblib_la_SOURCES = \
 	home-expand.c \
 	hook-build.c \
 	hostpid.c \
+	idna.c \
+	idna-punycode.c \
 	imem.c \
 	ipwd.c \
 	iostream.c \
@@ -219,7 +237,6 @@ liblib_la_SOURCES = \
 	process-stat.c \
 	process-title.c \
 	priorityq.c \
-	punycode.c \
 	randgen.c \
 	rand.c \
 	read-full.c \
@@ -234,6 +251,7 @@ liblib_la_SOURCES = \
 	sha1.c \
 	sha2.c \
 	sha3.c \
+	xxh64.c \
 	sleep.c \
 	sort.c \
 	stats-dist.c \
@@ -263,6 +281,7 @@ liblib_la_SOURCES = \
 	write-full.c
 
 headers = \
+	abnf.h \
 	aqueue.h \
 	array.h \
 	array-decl.h \
@@ -271,6 +290,7 @@ headers = \
 	base32.h \
 	base64.h \
 	bits.h \
+	bitmap.h \
 	bsearch-insert-pos.h \
 	buffer.h \
 	byteorder.h \
@@ -314,6 +334,8 @@ headers = \
 	home-expand.h \
 	hook-build.h \
 	hostpid.h \
+	idna.h \
+	idna-punycode.h \
 	imem.h \
 	ipwd.h \
 	iostream.h \
@@ -385,7 +407,6 @@ headers = \
 	process-stat.h \
 	process-title.h \
 	priorityq.h \
-	punycode.h \
 	randgen.h \
 	read-full.h \
 	restrict-access.h \
@@ -400,6 +421,7 @@ headers = \
 	sha1.h \
 	sha2.h \
 	sha3.h \
+	xxh64.h \
 	sleep.h \
 	sort.h \
 	stats-dist.h \
@@ -447,6 +469,7 @@ test_lib_SOURCES = \
 	test-base32.c \
 	test-base64.c \
 	test-bits.c \
+	test-bitmap.c \
 	test-bsearch-insert-pos.c \
 	test-buffer.c \
 	test-buffer-istream.c \
@@ -472,6 +495,8 @@ test_lib_SOURCES = \
 	test-hash-method.c \
 	test-hmac.c \
 	test-hex-binary.c \
+	test-idna.c \
+	test-idna-punycode.c \
 	test-imem.c \
 	test-ioloop.c \
 	test-iso8601-date.c \
@@ -514,7 +539,6 @@ test_lib_SOURCES = \
 	test-primes.c \
 	test-printf-format-fix.c \
 	test-priorityq.c \
-	test-punycode.c \
 	test-random.c \
 	test-seq-range-array.c \
 	test-seq-set-builder.c \

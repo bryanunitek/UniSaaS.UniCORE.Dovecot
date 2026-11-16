@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "lib-signals.h"
@@ -47,7 +47,11 @@
 
 /* If die callback hasn't managed to stop the service for this many seconds,
    force it. */
-#define MASTER_SERVICE_DIE_TIMEOUT_MSECS (30*1000)
+#define MASTER_SERVICE_DEFAULT_DIE_TIMEOUT_MSECS (30*1000)
+
+/* How often master_service_ioloop_run_interruptible() polls whether the
+   process has been killed. */
+#define MASTER_SERVICE_KILL_CHECK_MSECS 200
 
 struct master_service *master_service;
 
@@ -115,6 +119,17 @@ static void sig_delayed_die(const siginfo_t *si, void *context)
 {
 	struct master_service *service = context;
 
+	if (si->si_signo == SIGTERM && service->callback != NULL &&
+	    service->last_kick_signal_user_matched == 0) {
+		/* The SIGTERM handler didn't see a KICK-USER-SIGNAL command.
+		   It may still be on its way in a master-admin connection that
+		   was already accepted by the ioloop, in which case the signal
+		   handler couldn't have accept()ed it. Wait a while for the
+		   command, so the user gets disconnected with the "kicked"
+		   reason instead of the generic "shutting down" reason. */
+		master_admin_clients_wait_commands();
+	}
+
 	/* SIGINT comes either from master process or from keyboard. we don't
 	   want to log it in either case.*/
 	if (si->si_signo != SIGINT) {
@@ -152,7 +167,7 @@ static bool sig_term_buf_get_kick_user(char *buf, const char **user_r)
 		return FALSE;
 	buf += 30;
 	/* skip over minor version */
-	while (*buf >= '0' && *buf <= '0') buf++;
+	while (*buf >= '0' && *buf <= '9') buf++;
 	if (*buf != '\n')
 		return FALSE;
 	buf++;
@@ -547,6 +562,7 @@ master_service_init(const char *name, enum master_service_flags flags,
 		i_strconcat(getopt_str, master_service_getopt_string(), NULL);
 	service->flags = flags;
 	service->ioloop = io_loop_create();
+	service->die_timeout_msecs = MASTER_SERVICE_DEFAULT_DIE_TIMEOUT_MSECS;
 	service->restart_request_count_left = UINT_MAX;
 	service->datastack_frame_id = datastack_frame_id;
 
@@ -853,6 +869,12 @@ void master_service_set_die_callback(struct master_service *service,
 	service->die_callback = callback;
 }
 
+void master_service_set_die_timeout_msecs(struct master_service *service,
+					  unsigned int msecs)
+{
+	service->die_timeout_msecs = msecs;
+}
+
 void master_service_set_idle_die_callback(struct master_service *service,
 					  bool (*callback)(void))
 {
@@ -932,7 +954,7 @@ static void master_service_error(struct master_service *service)
 			master_service_stop(service);
 		else {
 			service->to_die =
-				timeout_add(MASTER_SERVICE_DIE_TIMEOUT_MSECS,
+				timeout_add(service->die_timeout_msecs,
 					    master_service_stop,
 					    service);
 			service->die_callback();
@@ -1257,6 +1279,43 @@ void master_service_run(struct master_service *service,
 	if (run)
 		io_loop_run(service->ioloop);
 	service->callback = NULL;
+}
+
+struct master_service_interruptible_run {
+	struct master_service *service;
+	struct ioloop *ioloop;
+};
+
+static void
+master_service_ioloop_check_killed(struct master_service_interruptible_run *ctx)
+{
+	if (master_service_is_killed(ctx->service))
+		io_loop_stop(ctx->ioloop);
+}
+
+int master_service_ioloop_run_interruptible(struct master_service *service,
+					    struct ioloop *ioloop)
+{
+	if (service == NULL) {
+		/* running in a unit test */
+		io_loop_run(ioloop);
+		return 0;
+	}
+	struct master_service_interruptible_run ctx = {
+		.service = service,
+		.ioloop = ioloop,
+	};
+	struct timeout *to;
+
+	/* A kill signal stops only service->ioloop (and only while we're in
+	   master_service_run()). A nested ioloop such as this one isn't
+	   noticed, so poll master_service_is_killed() to interrupt a slow
+	   request instead of blocking until it finishes. */
+	to = timeout_add_short_to(ioloop, MASTER_SERVICE_KILL_CHECK_MSECS,
+				  master_service_ioloop_check_killed, &ctx);
+	io_loop_run(ioloop);
+	timeout_remove(&to);
+	return master_service_is_killed(service) ? -1 : 0;
 }
 
 void master_service_stop(struct master_service *service)
@@ -2151,6 +2210,15 @@ void master_service_set_last_kick_signal_user(struct master_service *service,
 	i_free(service->last_kick_signal_user);
 	service->last_kick_signal_user = i_strdup(user);
 	service->last_kick_signal_user_accessed = 0;
+	if (service->killed_signal == SIGTERM &&
+	    service->current_user != NULL &&
+	    strcmp(user, service->current_user) == 0) {
+		/* The SIGTERM was already handled before this command was
+		   received, so the signal handler won't be doing the match
+		   anymore. */
+		service->last_kick_signal_user_accessed = 1;
+		service->last_kick_signal_user_matched = 1;
+	}
 
 	if (sigterm_blocked && sigprocmask(SIG_SETMASK, &oldmask, NULL) < 0) {
 		e_error(service->event,

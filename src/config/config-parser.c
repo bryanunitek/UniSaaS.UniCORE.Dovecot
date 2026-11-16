@@ -1,4 +1,4 @@
-/* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "array.h"
@@ -10,6 +10,7 @@
 #include "istream.h"
 #include "module-dir.h"
 #include "version.h"
+#include "storage-version.h"
 #include "settings.h"
 #include "service-settings.h"
 #include "master-service-settings.h"
@@ -466,7 +467,7 @@ config_filter_get_value(struct config_parser_context *ctx,
 		value = &l2->settings[config_key->define_idx];
 
 	if (value != NULL) {
-		if (value->prefixed_str[0] == CONFIG_VALUE_PREFIX_EXPANDED) {
+		if ((uint8_t)value->prefixed_str[0] != CONFIG_VALUE_PREFIX_SET_UNEXPANDED) {
 			str_append(str, set_str_expanded(value));
 			return 1;
 		}
@@ -1014,6 +1015,23 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			config_module_parser_init(ctx, l);
 			i_assert(l->settings != NULL);
 		}
+		if (((uint8_t)prefixed_value[0] & CONFIG_VALUE_PREFIX_HEREDOC) != 0) {
+			enum setting_type stype =
+				l->info->defines[config_key->define_idx].type;
+			if (stype == SET_STRLIST || stype == SET_BOOLLIST ||
+			    stype == SET_FILTER_ARRAY) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"Heredoc syntax is not supported for list settings: %s", key);
+				return -1;
+			}
+			if (stype != SET_STR && stype != SET_STR_NOVARS &&
+			    stype != SET_FILE) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"Heredoc syntax is not supported for this setting: %s",
+					key);
+				return -1;
+			}
+		}
 		switch (l->info->defines[config_key->define_idx].type) {
 		case SET_STRLIST:
 			if (config_apply_strlist(ctx, key, prefixed_value, config_key,
@@ -1049,6 +1067,24 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			break;
 		case SET_FILE: {
 			const char *inline_value;
+			if (((uint8_t)prefixed_value[0] & CONFIG_VALUE_PREFIX_HEREDOC) != 0) {
+				/* Heredoc for file setting: preserve marker and
+				   mark as FILE_INLINE. Store as
+				   HEREDOC|FILE_INLINE + MARKER + \n\n + content
+				   so set_str_expanded returns \ncontent, which
+				   settings_file_get() interprets as inline (empty
+				   path, full content). */
+				const char *rest = prefixed_value + 1; /* MARKER\ncontent */
+				const char *sep = strchr(rest, '\n');
+				i_assert(sep != NULL);
+				l->settings[config_key->define_idx].prefixed_str =
+					p_strdup_printf(ctx->pool, "%c%.*s\n\n%s",
+						CONFIG_VALUE_PREFIX_HEREDOC |
+						CONFIG_VALUE_PREFIX_FILE_INLINE,
+						(int)(sep - rest), rest,
+						sep + 1);
+				break;
+			}
 			if (prefixed_value[0] != CONFIG_VALUE_PREFIX_EXPANDED) {
 				/* FIXME: implement in a later commit */
 				i_assert(prefixed_value[0] == CONFIG_VALUE_PREFIX_SET_UNEXPANDED);
@@ -1060,10 +1096,12 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			const char *value = prefixed_value + 1;
 			if (str_begins(value, SET_FILE_INLINE_PREFIX,
 				       &inline_value)) {
+				/* "ssl_ca = inline:cert": store as FILE_INLINE.
+				   Use \n prefix so set_str_expanded returns
+				   \ncontent for settings_file_get() compat. */
 				l->settings[config_key->define_idx].prefixed_str =
-					value[0] == '\0' ? CONFIG_VALUE_PREFIX_EXPANDED_S :
 					p_strdup_printf(ctx->pool, "%c\n%s",
-							CONFIG_VALUE_PREFIX_EXPANDED,
+							CONFIG_VALUE_PREFIX_FILE_INLINE,
 							inline_value);
 				break;
 			}
@@ -1074,6 +1112,28 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			break;
 		}
 		default:
+			if (ctx->change_counter == CONFIG_PARSER_CHANGE_DEFAULTS &&
+			    prefixed_value[0] == CONFIG_VALUE_PREFIX_EXPANDED &&
+			    prefixed_value[1] == '\0') {
+				/* An empty built-in default for a setting that
+				   can't be empty (e.g. a number or time) means
+				   "no default": leave the value to be inherited
+				   from a less specific filter instead of failing.
+				   This lets a named filter keep a default-settings
+				   entry - so settings-history can override the
+				   value for old config versions - without forcing
+				   that value for current versions. */
+				const char *prev_error = ctx->error;
+				if (settings_value_check(ctx, l->info,
+					&l->info->defines[config_key->define_idx],
+					prefixed_value) < 0) {
+					/* Restore any pending error;
+					   settings_value_check() only sets
+					   ctx->error when it fails. */
+					ctx->error = prev_error;
+					continue;
+				}
+			}
 			l->settings[config_key->define_idx].prefixed_str =
 				p_strdup(ctx->pool, prefixed_value);
 			break;
@@ -1759,13 +1819,14 @@ config_filter_add_new_filter(struct config_parser_context *ctx,
 	return TRUE;
 }
 
-void config_fill_set_parser(struct setting_parser_context *parser,
+bool config_fill_set_parser(struct setting_parser_context *parser,
 			    const struct config_module_parser *p,
 			    bool expand_values)
 {
 	if (p->change_counters == NULL)
-		return;
+		return TRUE;
 
+	bool has_unknown_values = FALSE;
 	for (unsigned int i = 0; p->info->defines[i].key != NULL; i++) {
 		if (p->change_counters[i] == 0)
 			continue;
@@ -1807,6 +1868,7 @@ void config_fill_set_parser(struct setting_parser_context *parser,
 				/* We don't know what the variables would
 				   expand to. */
 				value = set_value_unknown;
+				has_unknown_values = TRUE;
 			}
 			(void)settings_parse_keyidx_value_nodup(parser, i,
 				p->info->defines[i].key, value);
@@ -1814,6 +1876,7 @@ void config_fill_set_parser(struct setting_parser_context *parser,
 		}
 		}
 	}
+	return !has_unknown_values;
 }
 
 static void
@@ -1864,11 +1927,20 @@ config_filter_parser_check(struct config_parser_context *ctx,
 		struct setting_parser_context *tmp_parser =
 			settings_parser_init(tmp_pool, p->info,
 					     settings_parser_flags);
+		ok = TRUE;
 		if (default_p != NULL) {
-			config_fill_set_parser(tmp_parser, default_p,
-					       ctx->expand_values);
+			ok = config_fill_set_parser(tmp_parser, default_p,
+						    ctx->expand_values);
 		}
-		config_fill_set_parser(tmp_parser, p, ctx->expand_values);
+		if (ok)
+			ok = config_fill_set_parser(tmp_parser, p, ctx->expand_values);
+		if (!ok) {
+			/* Can't check settings, e.g. %{variables} used in
+			   the parser. */
+			settings_parser_unref(&tmp_parser);
+			continue;
+		}
+
 		T_BEGIN {
 			ok = settings_parser_check(tmp_parser, tmp_pool,
 						   event, &error);
@@ -2158,6 +2230,30 @@ static int config_str_unescape(char *str, const char **error_r)
 	return 0;
 }
 
+static void parse_until_eod(struct config_parser_context *ctx,
+			    const char *marker,
+			    struct config_line *config_line_r)
+{
+	marker = p_strdup(ctx->pool, marker);
+	string_t *tmp = str_new(ctx->pool, 64);
+	const char *line;
+
+	while ((line = i_stream_read_next_line(ctx->cur_input->input)) != NULL) {
+		ctx->cur_input->linenum++;
+		if (strcmp(line, marker) == 0) {
+			config_line_r->value = str_c(tmp);
+			config_line_r->heredoc_marker = p_strdup(ctx->pool, marker);
+			config_line_r->type = CONFIG_LINE_TYPE_KEYVALUE;
+			return;
+		}
+		/* as this is multiline input, put newline in value */
+		str_append(tmp, line);
+		str_append_c(tmp, '\n');
+	}
+	config_line_r->value = p_strconcat(ctx->pool, "Missing ", marker, NULL);
+	config_line_r->type = CONFIG_LINE_TYPE_ERROR;
+}
+
 static void
 config_parse_line(struct config_parser_context *ctx,
 		  char *line, string_t *full_line,
@@ -2278,6 +2374,14 @@ config_parse_line(struct config_parser_context *ctx,
 		*line++ = '\0';
 		while (i_isspace(*line)) line++;
 
+		if (line[0] == '<' && line[1] == '<') {
+			const char *marker = line + 2;
+			while (i_isspace(*marker)) marker++;
+			if (*marker != '\0') {
+				parse_until_eod(ctx, marker, config_line_r);
+				return;
+			}
+		}
 		if (*line == '<') {
 			while (i_isspace(line[1])) line++;
 			config_line_r->value = line + 1;
@@ -2517,6 +2621,19 @@ static void config_filters_merge(struct config_parser_context *ctx,
 }
 
 static void
+config_filter_parser_clear_include_groups(struct config_filter_parser *filter)
+{
+	struct config_filter_parser *child;
+
+	/* The include groups have already been applied during parsing. Clear
+	   them so the filter can be merged into its parent. */
+	if (array_is_created(&filter->include_groups))
+		array_clear(&filter->include_groups);
+	for (child = filter->children_head; child != NULL; child = child->next)
+		config_filter_parser_clear_include_groups(child);
+}
+
+static void
 config_parse_merge_filters(struct config_parser_context *ctx,
 			   struct config_parsed *config,
 			   const struct config_filter *dump_filter)
@@ -2536,8 +2653,14 @@ config_parse_merge_filters(struct config_parser_context *ctx,
 			continue;
 		}
 
+		config_filter_parser_clear_include_groups(filter);
+		/* Promote group-included settings (CONFIG_PARSER_CHANGE_GROUP)
+		   to explicit. The include group reference was just cleared, so
+		   the settings can no longer be re-expanded from it; they must
+		   be dumped directly. Otherwise filters defined purely by a
+		   group (e.g. mailbox { } from a group) wouldn't be found. */
 		config_filters_merge(ctx, config, filter->parent, filter,
-				     TRUE, TRUE, 0);
+				     TRUE, TRUE, CONFIG_PARSER_CHANGE_EXPLICIT);
 	}
 }
 
@@ -2594,7 +2717,7 @@ static int config_expand_value(struct config_parser_context *ctx,
 			       struct config_filter_parser *filter_parser,
 			       const char *key, const char **value)
 {
-	if ((*value)[0] == CONFIG_VALUE_PREFIX_EXPANDED)
+	if ((uint8_t)(*value)[0] != CONFIG_VALUE_PREFIX_SET_UNEXPANDED)
 		return 0;
 	i_assert((*value)[0] == CONFIG_VALUE_PREFIX_SET_UNEXPANDED);
 
@@ -2798,7 +2921,7 @@ static int config_write_keyvariable(struct config_parser_context *ctx,
 			if (envval != NULL)
 				str_append(prefixed_str, envval);
 		} else if (expand_values && var_is_set) {
-			static struct config_filter_parser *set_parser;
+			struct config_filter_parser *set_parser;
 			struct config_parser_key *config_key;
 			const char *full_set_name = set_name;
 
@@ -2888,8 +3011,15 @@ static int config_write_value(struct config_parser_context *ctx,
 
 	switch (line->type) {
 	case CONFIG_LINE_TYPE_KEYVALUE:
-		str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);
-		str_append(ctx->prefixed_value, line->value);
+		if (line->heredoc_marker != NULL) {
+			str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_HEREDOC);
+			str_append(ctx->prefixed_value, line->heredoc_marker);
+			str_append_c(ctx->prefixed_value, '\n');
+			str_append(ctx->prefixed_value, line->value);
+		} else {
+			str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);
+			str_append(ctx->prefixed_value, line->value);
+		}
 		break;
 	case CONFIG_LINE_TYPE_KEYFILE:
 		str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);
@@ -2988,40 +3118,6 @@ config_parser_check_warnings(struct config_parser_context *ctx, const char *key,
 	hash_table_insert(ctx->seen_settings, path, first_pos);
 }
 
-static bool config_version_find(const char *version, const char **error_r)
-{
-	const char *const supported_versions[] = {
-#ifdef DOVECOT_PRO_EDITION
-		"3.1.0",
-		"3.1.1",
-		"3.1.2",
-		"3.1.3",
-		"3.1.4",
-		"3.1.5",
-		"3.2.0",
-#else
-		"2.4.0",
-		"2.4.1",
-		"2.4.2",
-		"2.4.3",
-		"2.4.4",
-#endif
-		NULL
-	};
-	/* FIXME: implement full version checking later */
-	if (!str_array_find(supported_versions, version) &&
-	    strcmp(DOVECOT_CONFIG_VERSION, version) != 0) {
-		*error_r = t_strdup_printf(
-			"Currently supported versions are: %s%s",
-			t_strarray_join(supported_versions, " "),
-			str_array_find(supported_versions,
-				       DOVECOT_CONFIG_VERSION) ? "" :
-			t_strdup_printf(" %s", DOVECOT_CONFIG_VERSION));
-		return FALSE;
-	}
-	return TRUE;
-}
-
 static bool
 dovecot_config_version_equals(struct config_parser_context *ctx, const char *value)
 {
@@ -3063,7 +3159,7 @@ static bool config_parser_get_version(struct config_parser_context *ctx,
 
 	if (line->type != CONFIG_LINE_TYPE_KEYVALUE)
 		ctx->error = "Invalid dovecot_config_version: value is not a string";
-	else if (!config_version_find(line->value, &error)) {
+	else if (!dovecot_config_version_find(line->value, &error)) {
 		ctx->error = p_strdup_printf(ctx->pool,
 			"Invalid dovecot_config_version: %s", error);
 	} else if (strcmp(line->value, CONFIG_VERSION_GIT) == 0) {
@@ -3078,17 +3174,22 @@ static bool config_parser_get_version(struct config_parser_context *ctx,
 static struct config_filter_parser *
 config_filter_parser_replace_parent(pool_t pool,
 				    const struct config_filter_parser *src,
-				    struct config_filter_parser *parent)
+				    struct config_filter_parser *parent,
+				    bool default_settings)
 {
 	struct config_filter_parser **p, *dest =
 		p_new(pool, struct config_filter_parser, 1);
 	*dest = *src;
 	dest->parent = parent;
 	dest->filter.parent = parent == NULL ? NULL : &parent->filter;
+	/* The filter must live in the same default/non-default settings tree
+	   as its parent. */
+	dest->filter.default_settings = default_settings;
 
 	/* Fix the parent pointer in children also */
 	for (p = &dest->children_head; *p != NULL; p = &(*p)->next) {
-		*p = config_filter_parser_replace_parent(pool, *p, dest);
+		*p = config_filter_parser_replace_parent(pool, *p, dest,
+							 default_settings);
 		dest->children_tail = *p;
 	}
 	return dest;
@@ -3123,18 +3224,26 @@ config_parser_include_merge(struct config_parser_context *ctx,
 
 	struct config_filter_parser *src_filter = include_filter->children_head;
 	for (; src_filter != NULL; src_filter = src_filter->next) {
-		/* replace @group parent with the current section */
-		struct config_filter_parser *dest, *new_src_filter =
-			config_filter_parser_replace_parent(ctx->pool,
-				src_filter, ctx->cur_section->filter_parser);
-		/* If parent filter now has a reverse default_settings,
-		   use the parent with the matching default_settings. */
+		/* If the group's filter has a different default_settings than
+		   the parent, and the parent has a reverse default_settings
+		   sibling, merge into the sibling whose default_settings
+		   matches the group's filter. If there is no such sibling, the
+		   parent exists only in a single tree, so the group's filter is
+		   forced into the parent's tree below. */
+		struct config_filter_parser *dest;
 		struct config_filter_parser *parent_parser =
 			ctx->cur_section->filter_parser;
-		if (parent_parser->filter.default_settings != new_src_filter->filter.default_settings) {
+		if (parent_parser->filter.default_settings != src_filter->filter.default_settings) {
 			config_parse_fill_reverse_default_siblings(ctx);
-			parent_parser = parent_parser->reverse_default_sibling;
+			if (parent_parser->reverse_default_sibling != NULL)
+				parent_parser = parent_parser->reverse_default_sibling;
 		}
+		/* replace @group parent with the chosen parent. The filter and
+		   its children must live in the same tree as the parent. */
+		struct config_filter_parser *new_src_filter =
+			config_filter_parser_replace_parent(ctx->pool,
+				src_filter, parent_parser,
+				parent_parser->filter.default_settings);
 
 		dest = config_filters_find_child(parent_parser,
 						 &new_src_filter->filter);
@@ -3209,7 +3318,11 @@ void config_parser_apply_line(struct config_parser_context *ctx,
 				break;
 			}
 			if (str_c(ctx->prefixed_value)[0] != CONFIG_VALUE_PREFIX_EXPANDED) {
-				ctx->error = "Include groups cannot contain $variables";
+				if (((uint8_t)str_c(ctx->prefixed_value)[0] &
+				     CONFIG_VALUE_PREFIX_HEREDOC) != 0)
+					ctx->error = "Heredoc syntax is not supported for include groups";
+				else
+					ctx->error = "Include groups cannot contain $variables";
 				break;
 			}
 			config_parser_include_add_or_update(ctx, line->key + 1,
@@ -3590,15 +3703,10 @@ int config_parse_file(const char *path, enum config_parse_flags flags,
 
 	if ((flags & CONFIG_PARSE_FLAG_DEFAULT_VERSION) != 0) {
 		/* Use default settings. Set dovecot_storage_version to the
-		   latest version, so it won't cause a failure.
-
-		   When building from git we don't know the latest version, so
-		   just use 9999. The version validity checks are disabled for
-		   git builds, so this should work. */
-		const char *version = version_is_valid(DOVECOT_VERSION) ?
-			DOVECOT_VERSION : "9999";
+		   latest version, so it won't cause a failure. */
 		const char *prefixed_version =
-			t_strdup_printf("%c%s", CONFIG_VALUE_PREFIX_EXPANDED, version);
+			t_strdup_printf("%c%s", CONFIG_VALUE_PREFIX_EXPANDED,
+			storage_version_default());
 		if (config_apply_exact_line(&ctx, NULL, "dovecot_storage_version",
 					    prefixed_version) < 0)
 			i_panic("Couldn't set default dovecot_storage_version: %s", ctx.error);

@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 Dovecot authors, see the included COPYING file */
+/* Copyright (c) Dovecot authors, see top-level COPYING file */
 
 #include "lib.h"
 #include "str.h"
@@ -42,6 +42,15 @@ static void test_iostream_dot_random_io(void)
 				else {
 					in_buf[j] = '\r';
 					in_buf[j + 1] = '\n';
+				}
+			}
+			if (in_buf[j] == '.' &&
+			    j > 0 && in_buf[j - 1] == '\r') {
+				if (j + 1 == in_buf_size)
+					in_buf[j] = ' ';
+				else {
+					in_buf[j] = '\n';
+					in_buf[j + 1] = '.';
 				}
 			}
 		}
